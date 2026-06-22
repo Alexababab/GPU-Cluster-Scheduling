@@ -10,7 +10,7 @@ int main() {
 
     try {
         const Instance instance = read_instance(std::cin);
-        const SequentialBaseline scheduler(instance);
+        GreedyScheduler scheduler(instance);
         write_schedule(std::cout, scheduler.solve());
         return 0;
     } catch (const std::exception& error) {
@@ -18,4 +18,3 @@ int main() {
         return 1;
     }
 }
-

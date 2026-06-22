@@ -9,6 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_executable(scheduler
     src/main.cpp
     src/io.cpp
+    src/server_state.cpp
     src/scheduler.cpp
 )
 
@@ -19,4 +20,3 @@ if(MSVC)
 else()
     target_compile_options(scheduler PRIVATE -Wall -Wextra -Wpedantic)
 endif()
-

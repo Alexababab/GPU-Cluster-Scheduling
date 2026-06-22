@@ -16,3 +16,6 @@
 *.zip
 *.log
 
+# Local Git collaboration notes.
+/githu_rule.md
+/github_rule.md
