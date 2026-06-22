@@ -1,0 +1,18 @@
+/build/
+/tmp/
+/.cache/
+/.idea/
+/.vscode/
+
+# Course materials and public datasets are kept locally, not duplicated in Git.
+/课程设计相关材料/
+
+# Generated experiment artifacts.
+/experiments/results/*
+!/experiments/results/.gitkeep
+
+*.exe
+*.out
+*.zip
+*.log
+
