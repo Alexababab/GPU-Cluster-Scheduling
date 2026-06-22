@@ -15,4 +15,9 @@
 *.out
 *.zip
 *.log
+*.obj
+*.exp
+*.lib
+*.pdb
+*.ilk
 
