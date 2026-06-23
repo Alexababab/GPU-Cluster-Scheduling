@@ -27,6 +27,16 @@ sh run.sh < tests/handcrafted/smoke.in
 python3 tools/validate_schedule.py case.in case.out
 ```
 
+运行完整 V0 批处理闭环：
+
+```sh
+python3 tools/batch_runner/run_all.py path/to/dataset
+```
+
+批处理工具会依次调用 `build/scheduler` 和 `build/validator`，并将合法性、
+`E_wait`、`E_memory`、`E_finish` 与运行时间写入汇总 CSV。任一实例运行失败、
+超时或验证失败时，批处理命令返回非零退出码。
+
 正式评测约束：
 
 - Linux、C++17；
