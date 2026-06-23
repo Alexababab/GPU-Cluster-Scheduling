@@ -37,6 +37,20 @@ python3 tools/batch_runner/run_all.py path/to/dataset
 `E_wait`、`E_memory`、`E_finish` 与运行时间写入汇总 CSV。任一实例运行失败、
 超时或验证失败时，批处理命令返回非零退出码。
 
+## 调度配置
+
+通过环境变量选择算法配置：
+
+```sh
+SCHEDULER_CONFIG=v0 sh run.sh < case.in
+SCHEDULER_CONFIG=v1a sh run.sh < case.in
+SCHEDULER_CONFIG=v1b sh run.sh < case.in
+```
+
+- `v0`：原始任务顺序和 V0 best-fit，用于回归；
+- `v1a`：优先级、等待时间、稀缺度和任务面积排序；
+- `v1b`：V1a 排序加多维 Filter + Score，当前默认配置。
+
 正式评测约束：
 
 - Linux、C++17；
