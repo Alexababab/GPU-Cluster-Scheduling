@@ -59,17 +59,18 @@ double MetricsCalculator::calcMemoryMetric(const vector<Assignment>& schedule) c
         long long interval = t_end - t_start;
 
         double interval_idle = 0.0;
-        for (const auto& [sid, asgns] : by_server) {
-            auto sit = server_map.find(sid);
-            if (sit == server_map.end()) continue;
-            const Server& srv = sit->second;
+        for (const Server& srv : servers_) {
+            const auto assignments_it = by_server.find(srv.id);
 
             int used = 0;
-            for (const auto* asgn_ptr : asgns) {
-                if (asgn_ptr->start_time < t_end && asgn_ptr->finish_time > t_start) {
-                    auto jit = task_map.find(asgn_ptr->task_id);
-                    if (jit != task_map.end()) {
-                        used += jit->second.total_gpu_memory;
+            if (assignments_it != by_server.end()) {
+                for (const auto* asgn_ptr : assignments_it->second) {
+                    if (asgn_ptr->start_time < t_end &&
+                        asgn_ptr->finish_time > t_start) {
+                        auto jit = task_map.find(asgn_ptr->task_id);
+                        if (jit != task_map.end()) {
+                            used += jit->second.total_gpu_memory;
+                        }
                     }
                 }
             }
@@ -96,7 +97,7 @@ long long MetricsCalculator::calcFinishMetric(const vector<Assignment>& schedule
 }
 
 vector<long long> MetricsCalculator::collectTimePoints(const vector<Assignment>& schedule) const {
-    vector<long long> points;
+    vector<long long> points{0};
     for (const auto& asgn : schedule) {
         points.push_back(asgn.start_time);
         points.push_back(asgn.finish_time);
