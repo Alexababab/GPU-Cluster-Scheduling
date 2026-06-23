@@ -20,8 +20,26 @@ add_executable(validator
     src/metrics.cpp
 )
 
+add_executable(schedule_ops_test
+    experiments/schedule_ops_test.cpp
+    src/io.cpp
+    src/schedule_ops.cpp
+    src/server_state.cpp
+)
+
 target_include_directories(scheduler PRIVATE include)
 target_include_directories(validator PRIVATE include)
+target_include_directories(schedule_ops_test PRIVATE include)
+
+if(MSVC)
+    target_compile_options(scheduler PRIVATE /W4 /permissive-)
+    target_compile_options(validator PRIVATE /W4 /permissive-)
+    target_compile_options(schedule_ops_test PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(scheduler PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(validator PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(schedule_ops_test PRIVATE -Wall -Wextra -Wpedantic)
+endif()
 
 if(MSVC)
     target_compile_options(scheduler PRIVATE /W4 /permissive-)

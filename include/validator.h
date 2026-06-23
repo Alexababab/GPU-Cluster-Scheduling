@@ -13,6 +13,18 @@ struct ValidationError {
 struct ValidationResult {
     bool is_valid;
     std::vector<ValidationError> errors;
+    int total_tasks;
+    int used_servers;
+    long long makespan;
+    // Per-server usage summary: {server_id: gpu_used, cpu_used, memory_used} at peak
+    struct ServerUsage {
+        int server_id;
+        int peak_gpu_used;
+        int peak_cpu_used;
+        int peak_memory_used;
+        double utilization_ratio; // avg GPU used / total GPU over schedule
+    };
+    std::vector<ServerUsage> server_usages;
 };
 
 class Validator {
@@ -58,4 +70,8 @@ private:
     // 8. Concurrent resource constraint
     void checkConcurrentResources(const std::vector<Assignment>& schedule,
                                   std::vector<ValidationError>& errors) const;
+
+    // Diagnostics: populate result stats even if invalid
+    void collectDiagnostics(const std::vector<Assignment>& schedule,
+                            ValidationResult& result) const;
 };

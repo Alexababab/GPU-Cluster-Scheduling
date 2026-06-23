@@ -14,7 +14,10 @@ Validator::Validator(const vector<Server>& servers,
 
 ValidationResult Validator::validate(const vector<Assignment>& schedule) const {
     ValidationResult result{true, {}};
+    result.total_tasks = static_cast<int>(tasks_.size());
+    result.makespan = 0;
 
+    // Run all 8 checks
     checkCompleteness(schedule, result.errors);
     checkReleaseTime(schedule, result.errors);
     checkGpuCount(schedule, result.errors);
@@ -24,10 +27,115 @@ ValidationResult Validator::validate(const vector<Assignment>& schedule) const {
     checkFinishTime(schedule, result.errors);
     checkConcurrentResources(schedule, result.errors);
 
+    bool has_fatal = false;
+    for (const auto& e : result.errors) {
+        // Missing task / wrong count prevents further analysis
+        if (e.task_id == 0 && e.message.find("output line count") != string::npos) {
+            has_fatal = true;
+            break;
+        }
+    }
+
     if (!result.errors.empty()) {
         result.is_valid = false;
     }
+
+    // Collect diagnostic statistics even if invalid
+    collectDiagnostics(schedule, result);
+
     return result;
+}
+
+void Validator::collectDiagnostics(const vector<Assignment>& schedule,
+                                   ValidationResult& result) const {
+    unordered_map<int, Task> task_map;
+    for (const auto& t : tasks_) task_map[t.id] = t;
+    unordered_map<int, Server> server_map;
+    for (const auto& s : servers_) server_map[s.id] = s;
+
+    // Makespan
+    for (const auto& asgn : schedule) {
+        if (asgn.finish_time > result.makespan) {
+            result.makespan = asgn.finish_time;
+        }
+    }
+
+    // Used servers count
+    unordered_map<int, int> server_task_count;
+    for (const auto& asgn : schedule) {
+        if (server_map.count(asgn.server_id)) {
+            server_task_count[asgn.server_id]++;
+        }
+    }
+    result.used_servers = static_cast<int>(server_task_count.size());
+
+    // Per-server peak usage
+    unordered_map<int, vector<const Assignment*>> by_server;
+    for (const auto& asgn : schedule) {
+        by_server[asgn.server_id].push_back(&asgn);
+    }
+
+    for (const auto& [sid, asgns] : by_server) {
+        auto sit = server_map.find(sid);
+        if (sit == server_map.end()) continue;
+        const Server& srv = sit->second;
+
+        // Collect intervals
+        struct InternalInterval {
+            long long start, end;
+            int gpu, cpu, mem;
+        };
+        vector<InternalInterval> intervals;
+        for (const auto* aptr : asgns) {
+            auto it = task_map.find(aptr->task_id);
+            if (it == task_map.end()) continue;
+            intervals.push_back({aptr->start_time, aptr->finish_time,
+                                 aptr->gpu_count, it->second.cpu_cores,
+                                 it->second.memory});
+        }
+
+        // Collect time points
+        vector<long long> pts;
+        for (const auto& iv : intervals) {
+            pts.push_back(iv.start);
+            pts.push_back(iv.end);
+        }
+        sort(pts.begin(), pts.end());
+        pts.erase(unique(pts.begin(), pts.end()), pts.end());
+
+        int peak_gpu = 0, peak_cpu = 0, peak_mem = 0;
+        double total_gpu_time = 0;
+        long long server_total_time = 0;
+
+        for (size_t ti = 0; ti + 1 < pts.size(); ++ti) {
+            long long t_start = pts[ti];
+            long long t_end = pts[ti + 1];
+            if (t_start == t_end) continue;
+            long long span = t_end - t_start;
+
+            int sg = 0, sc = 0, sm = 0;
+            for (const auto& iv : intervals) {
+                if (iv.start < t_end && iv.end > t_start) {
+                    sg += iv.gpu;
+                    sc += iv.cpu;
+                    sm += iv.mem;
+                }
+            }
+            peak_gpu = max(peak_gpu, sg);
+            peak_cpu = max(peak_cpu, sc);
+            peak_mem = max(peak_mem, sm);
+
+            total_gpu_time += 1.0 * sg * span;
+            server_total_time += span;
+        }
+
+        double util = 0.0;
+        if (server_total_time > 0) {
+            util = total_gpu_time / (srv.gpu_count * server_total_time);
+        }
+
+        result.server_usages.push_back({sid, peak_gpu, peak_cpu, peak_mem, util});
+    }
 }
 
 void Validator::checkCompleteness(const vector<Assignment>& schedule,

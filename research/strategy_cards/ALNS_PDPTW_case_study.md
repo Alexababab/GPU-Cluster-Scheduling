@@ -1,0 +1,45 @@
+# ALNS 案例研究：PDPTW 取送货应用
+
+- 来源：Ropke, S., & Pisinger, D. (2006). An Adaptive Large Neighborhood Search Heuristic for the Pickup and Delivery Problem with Time Windows. *Transportation Science*, 40(4), 455-472.
+- 原问题：带时间窗的取送货问题（PDPTW）
+- 核心机制：
+  - 多个 destroy/repair 方法竞争，自适应权重
+  - Destroy: 随机移除（random removal）、最差移除（worst removal）、关联移除（related removal）、历史移除（history removal）
+  - Repair: 贪心插入（greedy insertion）、遗憾插入（regret insertion）
+  - 自适应权重：每次迭代记录方法表现（新全局最优 ω1、优于当前 ω2、被接受 ω3、被拒绝 ω4）
+  - 权重更新：ρ_new = λ·ρ_old + (1-λ)·ψ，λ 为衰减因子
+  - SA 接受准则：温度 T 逐渐降低
+  - 破坏程度（random removal count）从一定范围内随机选择
+- 与本题的差异：
+  - PDPTW 是**路径**问题，本题是**服务器-时间分配**问题
+  - PDPTW 的"客户点"有先后顺序约束（先取后送），本题任务独立
+  - PDPTW 的"车辆容量"是一维，本题有四维资源（GPU、显存、CPU、内存）
+  - PDPTW 的时间窗是硬约束（必须 window 内服务），本题只有 release_time
+- 本题可采用部分：
+  - **Regret-2 insertion**：对于当前解中的任务，计算插入到最好位置与次好位置的代价差，后悔值最大的优先插入
+  - **Worst removal**：移除对当前目标贡献最差（inc_cost 最大）的 q 个任务
+  - **Related removal**：按 GPU 需求、CPU 需求、服务器偏好等维度定义关联度，移除关联度高的任务群
+  - **自适应权重调整**：为不同的 destroy/repair 策略动态分配权重
+- 计划修改：
+  - Destroy:
+    - random: 随机选 q 个任务移除
+    - worst: 按 finish_time - release_time - duration 最大移除
+    - related: 按 GPU 需求相似度聚类移除
+  - Repair:
+    - greedy: 插入使 E_finish 增量最小的位置
+    - regret-2: 考虑次好位置的代价差
+- 预计改善指标：
+  - 综合三项指标，通过自适应选择最优组合
+- 预计适用实例：
+  - 大中规模（N > 100），贪心无法充分考虑全局
+  - 需自适应参数调的实例
+- 实现成本：中高（需要 regret 计算、自适应权重维护、destroy 多样性）
+- 实现者：B（V2 阶段实现，需要 V1 的局部操作原型做基础）
+- 实验对照：
+  - 对照0：V1-best 贪心
+  - 对照1：single destroy (random) + greedy repair
+  - 对照2：multiple destroy (random, worst, related) + greedy repair
+  - 对照3：multiple destroy + regret-2 repair
+  - 对照4：full ALNS with adaptive weights
+- 实验结果：（待 V2 实施后填写）
+- 最终决定：（待 V2 实施后填写）
