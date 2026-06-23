@@ -9,6 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_executable(scheduler
     src/main.cpp
     src/io.cpp
+    src/scheduler_config.cpp
     src/server_state.cpp
     src/scheduler.cpp
 )

@@ -1,11 +1,17 @@
 #include "scheduler.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
-GreedyScheduler::GreedyScheduler(const Instance& instance)
-    : tasks_(instance.tasks) {
+GreedyScheduler::GreedyScheduler(
+    const Instance& instance,
+    SchedulerConfig config
+)
+    : config_(std::move(config)),
+      tasks_(instance.tasks) {
     std::sort(
         tasks_.begin(),
         tasks_.end(),
@@ -31,6 +37,7 @@ GreedyScheduler::GreedyScheduler(const Instance& instance)
     }
 
     build_feasible_placements();
+    build_task_features();
 }
 
 bool GreedyScheduler::FinishEvent::operator>(
@@ -73,6 +80,33 @@ void GreedyScheduler::build_feasible_placements() {
     }
 }
 
+void GreedyScheduler::build_task_features() {
+    task_features_.resize(tasks_.size());
+
+    for (std::size_t task_index = 0;
+         task_index < tasks_.size();
+         ++task_index) {
+        const Task& task = tasks_[task_index];
+        const auto& placements = feasible_placements_[task_index];
+        int min_required_gpu = std::numeric_limits<int>::max();
+        for (const FeasiblePlacement& placement : placements) {
+            min_required_gpu =
+                std::min(min_required_gpu, placement.gpu_count);
+        }
+
+        const double area =
+            static_cast<double>(task.duration) *
+            static_cast<double>(min_required_gpu);
+        task_features_[task_index] = TaskFeatures{
+            static_cast<int>(placements.size()),
+            min_required_gpu,
+            1.0 / static_cast<double>(placements.size()),
+            std::log1p(area),
+            1.0 / (1.0 + static_cast<double>(task.duration)),
+        };
+    }
+}
+
 void GreedyScheduler::release_finished(
     long long current_time,
     std::priority_queue<
@@ -97,6 +131,15 @@ void GreedyScheduler::release_finished(
 }
 
 GreedyScheduler::StartChoice GreedyScheduler::choose_start(
+    int task_index
+) const {
+    if (config_.server_score.mode == ServerSelectionMode::V0BestFit) {
+        return choose_start_v0(task_index);
+    }
+    return choose_start_scored(task_index);
+}
+
+GreedyScheduler::StartChoice GreedyScheduler::choose_start_v0(
     int task_index
 ) const {
     if (task_index < 0 ||
@@ -142,6 +185,7 @@ GreedyScheduler::StartChoice GreedyScheduler::choose_start(
             best = StartChoice{
                 placement.server_index,
                 placement.gpu_count,
+                0.0,
             };
             best_gpu_after = gpu_after;
             best_cpu_after = cpu_after;
@@ -150,6 +194,140 @@ GreedyScheduler::StartChoice GreedyScheduler::choose_start(
     }
 
     return best;
+}
+
+GreedyScheduler::ServerScoreBreakdown GreedyScheduler::score_server(
+    int task_index,
+    const FeasiblePlacement& placement
+) const {
+    const Task& task = tasks_[task_index];
+    const ServerState& state = servers_[placement.server_index];
+    const Server& server = state.server();
+
+    const int gpu_after =
+        state.remaining_gpu() - placement.gpu_count;
+    const int cpu_after =
+        state.remaining_cpu() - task.cpu_cores;
+    const int memory_after =
+        state.remaining_memory() - task.memory;
+    const int allocated_gpu_memory =
+        placement.gpu_count * server.gpu_memory;
+    const int unused_allocated_gpu_memory =
+        allocated_gpu_memory - task.total_gpu_memory;
+
+    ServerScoreBreakdown score;
+    score.gpu_fragment_cost =
+        static_cast<double>(gpu_after) /
+        static_cast<double>(server.gpu_count);
+    score.gpu_memory_fragment_cost =
+        static_cast<double>(unused_allocated_gpu_memory) /
+        static_cast<double>(server.gpu_count * server.gpu_memory);
+    score.cpu_fragment_cost =
+        static_cast<double>(cpu_after) /
+        static_cast<double>(server.cpu_cores);
+    score.memory_fragment_cost =
+        static_cast<double>(memory_after) /
+        static_cast<double>(server.memory);
+    score.total =
+        config_.server_score.w_gpu_fragment *
+            score.gpu_fragment_cost +
+        config_.server_score.w_gpu_memory_fragment *
+            score.gpu_memory_fragment_cost +
+        config_.server_score.w_cpu_fragment *
+            score.cpu_fragment_cost +
+        config_.server_score.w_memory_fragment *
+            score.memory_fragment_cost;
+    return score;
+}
+
+GreedyScheduler::StartChoice GreedyScheduler::choose_start_scored(
+    int task_index
+) const {
+    if (task_index < 0 ||
+        task_index >= static_cast<int>(tasks_.size())) {
+        throw std::logic_error("invalid task index");
+    }
+    const Task& task = tasks_[task_index];
+
+    StartChoice best;
+    double best_score = std::numeric_limits<double>::infinity();
+
+    for (const FeasiblePlacement& placement :
+         feasible_placements_[static_cast<std::size_t>(task_index)]) {
+        const ServerState& server = servers_[placement.server_index];
+
+        // Filter stage: permanent feasibility is precomputed; this checks
+        // current GPU, CPU, and memory availability.
+        if (!server.can_start(task, placement.gpu_count)) {
+            continue;
+        }
+
+        const ServerScoreBreakdown breakdown =
+            score_server(task_index, placement);
+        const bool better =
+            best.server_index == -1 ||
+            breakdown.total < best_score ||
+            (breakdown.total == best_score &&
+             server.server().id <
+                 servers_[best.server_index].server().id);
+        if (better) {
+            best = StartChoice{
+                placement.server_index,
+                placement.gpu_count,
+                breakdown.total,
+            };
+            best_score = breakdown.total;
+        }
+    }
+
+    return best;
+}
+
+double GreedyScheduler::score_pending_task(
+    int task_index,
+    long long current_time
+) const {
+    const Task& task = tasks_[task_index];
+    const TaskFeatures& features = task_features_[task_index];
+    const long long wait_time =
+        std::max(0LL, current_time - task.release_time);
+
+    return
+        config_.task_score.w_priority *
+            static_cast<double>(task.weight) +
+        config_.task_score.w_wait *
+            static_cast<double>(wait_time) *
+            static_cast<double>(task.weight) +
+        config_.task_score.w_scarcity *
+            features.scarcity -
+        config_.task_score.w_area *
+            features.log_area +
+        config_.task_score.w_short_job *
+            features.inverse_duration;
+}
+
+void GreedyScheduler::order_pending_tasks(
+    std::vector<int>& pending_task_indices,
+    long long current_time
+) const {
+    if (!config_.task_score.enabled) {
+        return;
+    }
+
+    std::stable_sort(
+        pending_task_indices.begin(),
+        pending_task_indices.end(),
+        [this, current_time](int left_index, int right_index) {
+            const double left_score =
+                score_pending_task(left_index, current_time);
+            const double right_score =
+                score_pending_task(right_index, current_time);
+            if (left_score != right_score) {
+                return left_score > right_score;
+            }
+            return tasks_[left_index].id < tasks_[right_index].id;
+        }
+    );
 }
 
 bool GreedyScheduler::start_ready_tasks(
@@ -162,6 +340,8 @@ bool GreedyScheduler::start_ready_tasks(
         std::greater<FinishEvent>
     >& finish_events
 ) {
+    order_pending_tasks(pending_task_indices, current_time);
+
     bool started_any = false;
     std::vector<int> still_pending;
     still_pending.reserve(pending_task_indices.size());
