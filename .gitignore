@@ -15,4 +15,12 @@
 *.out
 *.zip
 *.log
+*.obj
+*.exp
+*.lib
+*.pdb
+*.ilk
 
+# Local Git collaboration notes.
+/githu_rule.md
+/github_rule.md

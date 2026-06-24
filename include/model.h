@@ -34,3 +34,11 @@ struct Assignment {
     long long finish_time = 0;
 };
 
+struct RunningTask {
+    int task_id = 0;
+    int server_id = 0;
+    long long finish_time = 0;
+    int gpu_count = 0;
+    int cpu_cores = 0;
+    int memory = 0;
+};
