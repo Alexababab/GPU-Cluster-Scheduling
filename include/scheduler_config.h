@@ -32,3 +32,5 @@ struct SchedulerConfig {
 
 SchedulerConfig scheduler_config_from_name(const std::string& name);
 
+SchedulerConfig scheduler_config_from_file(const std::string& path);
+
