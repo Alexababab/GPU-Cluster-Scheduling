@@ -38,7 +38,8 @@ bool ServerState::can_start(const Task& task, int gpu_count) const {
 std::pair<Assignment, RunningTask> ServerState::start(
     const Task& task,
     long long start_time,
-    int gpu_count
+    int gpu_count,
+    bool large_task
 ) {
     if (!can_start(task, gpu_count)) {
         throw std::logic_error("attempted to over-allocate a server");
@@ -47,6 +48,11 @@ std::pair<Assignment, RunningTask> ServerState::start(
     remaining_gpu_ -= gpu_count;
     remaining_cpu_ -= task.cpu_cores;
     remaining_memory_ -= task.memory;
+    if (large_task) {
+        large_task_gpu_in_use_ += gpu_count;
+    } else {
+        small_task_gpu_in_use_ += gpu_count;
+    }
 
     const long long finish_time = start_time + task.duration;
     Assignment assignment{
@@ -63,6 +69,7 @@ std::pair<Assignment, RunningTask> ServerState::start(
         gpu_count,
         task.cpu_cores,
         task.memory,
+        large_task,
     };
     return {assignment, running};
 }
@@ -75,10 +82,17 @@ void ServerState::release(const RunningTask& task) {
     remaining_gpu_ += task.gpu_count;
     remaining_cpu_ += task.cpu_cores;
     remaining_memory_ += task.memory;
+    if (task.large_task) {
+        large_task_gpu_in_use_ -= task.gpu_count;
+    } else {
+        small_task_gpu_in_use_ -= task.gpu_count;
+    }
 
     if (remaining_gpu_ > server_.gpu_count ||
         remaining_cpu_ > server_.cpu_cores ||
-        remaining_memory_ > server_.memory) {
+        remaining_memory_ > server_.memory ||
+        large_task_gpu_in_use_ < 0 ||
+        small_task_gpu_in_use_ < 0) {
         throw std::logic_error("server resources exceeded capacity on release");
     }
 }
@@ -97,4 +111,12 @@ int ServerState::remaining_cpu() const {
 
 int ServerState::remaining_memory() const {
     return remaining_memory_;
+}
+
+int ServerState::large_task_gpu_in_use() const {
+    return large_task_gpu_in_use_;
+}
+
+int ServerState::small_task_gpu_in_use() const {
+    return small_task_gpu_in_use_;
 }

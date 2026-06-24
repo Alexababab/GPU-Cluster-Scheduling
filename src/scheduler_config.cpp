@@ -71,6 +71,20 @@ SchedulerConfig scheduler_config_from_name(const std::string& name) {
         return SchedulerConfig{};
     }
 
+    if (name == "v1c" ||
+        name == "v1c_fragmentation_isolation") {
+        SchedulerConfig config;
+        config.name = "v1c_fragmentation_isolation";
+        config.server_score.w_residual_imbalance = 2.0;
+        config.isolation_score.enabled = true;
+        config.isolation_score.large_task_gpu_threshold = 4;
+        config.isolation_score.high_capacity_gpu_threshold = 8;
+        config.isolation_score.w_high_capacity_reserve = 5.0;
+        config.isolation_score.w_class_mismatch = 3.0;
+        config.isolation_score.w_same_class_affinity = 0.75;
+        return config;
+    }
+
     if (name == "custom") {
         const char* config_path_env =
             std::getenv("SCHEDULER_CONFIG_FILE");
@@ -144,6 +158,27 @@ SchedulerConfig scheduler_config_from_file(const std::string& path) {
         } else if (key == "w_memory_fragment") {
             config.server_score.w_memory_fragment =
                 parse_double(key, value);
+        } else if (key == "w_residual_imbalance") {
+            config.server_score.w_residual_imbalance =
+                parse_double(key, value);
+        } else if (key == "isolation_enabled") {
+            config.isolation_score.enabled =
+                parse_bool(key, value);
+        } else if (key == "large_task_gpu_threshold") {
+            config.isolation_score.large_task_gpu_threshold =
+                static_cast<int>(parse_double(key, value));
+        } else if (key == "high_capacity_gpu_threshold") {
+            config.isolation_score.high_capacity_gpu_threshold =
+                static_cast<int>(parse_double(key, value));
+        } else if (key == "w_high_capacity_reserve") {
+            config.isolation_score.w_high_capacity_reserve =
+                parse_double(key, value);
+        } else if (key == "w_class_mismatch") {
+            config.isolation_score.w_class_mismatch =
+                parse_double(key, value);
+        } else if (key == "w_same_class_affinity") {
+            config.isolation_score.w_same_class_affinity =
+                parse_double(key, value);
         } else {
             throw std::invalid_argument(
                 "unknown config key at line " +
@@ -153,4 +188,3 @@ SchedulerConfig scheduler_config_from_file(const std::string& path) {
 
     return config;
 }
-

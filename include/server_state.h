@@ -16,7 +16,8 @@ public:
     std::pair<Assignment, RunningTask> start(
         const Task& task,
         long long start_time,
-        int gpu_count
+        int gpu_count,
+        bool large_task = false
     );
     void release(const RunningTask& task);
 
@@ -24,10 +25,14 @@ public:
     int remaining_gpu() const;
     int remaining_cpu() const;
     int remaining_memory() const;
+    int large_task_gpu_in_use() const;
+    int small_task_gpu_in_use() const;
 
 private:
     Server server_;
     int remaining_gpu_ = 0;
     int remaining_cpu_ = 0;
     int remaining_memory_ = 0;
+    int large_task_gpu_in_use_ = 0;
+    int small_task_gpu_in_use_ = 0;
 };

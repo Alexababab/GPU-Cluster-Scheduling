@@ -228,6 +228,47 @@ GreedyScheduler::ServerScoreBreakdown GreedyScheduler::score_server(
     score.memory_fragment_cost =
         static_cast<double>(memory_after) /
         static_cast<double>(server.memory);
+    const double gpu_after_ratio = score.gpu_fragment_cost;
+    const double cpu_after_ratio = score.cpu_fragment_cost;
+    const double memory_after_ratio = score.memory_fragment_cost;
+    const double max_after_ratio = std::max(
+        gpu_after_ratio,
+        std::max(cpu_after_ratio, memory_after_ratio)
+    );
+    const double min_after_ratio = std::min(
+        gpu_after_ratio,
+        std::min(cpu_after_ratio, memory_after_ratio)
+    );
+    score.residual_imbalance_cost = max_after_ratio - min_after_ratio;
+
+    if (config_.isolation_score.enabled) {
+        const bool large_task = is_large_task(task_index, placement);
+        const bool high_capacity_server =
+            server.gpu_count >=
+            config_.isolation_score.high_capacity_gpu_threshold;
+        const bool server_empty =
+            state.remaining_gpu() == server.gpu_count &&
+            state.remaining_cpu() == server.cpu_cores &&
+            state.remaining_memory() == server.memory;
+        const double large_gpu_ratio =
+            static_cast<double>(state.large_task_gpu_in_use()) /
+            static_cast<double>(server.gpu_count);
+        const double small_gpu_ratio =
+            static_cast<double>(state.small_task_gpu_in_use()) /
+            static_cast<double>(server.gpu_count);
+
+        if (!large_task && high_capacity_server) {
+            score.high_capacity_reserve_cost = server_empty ? 1.0 : 0.35;
+        }
+        if (large_task) {
+            score.class_mismatch_cost = small_gpu_ratio;
+            score.same_class_affinity = large_gpu_ratio;
+        } else {
+            score.class_mismatch_cost = large_gpu_ratio;
+            score.same_class_affinity = small_gpu_ratio;
+        }
+    }
+
     score.total =
         config_.server_score.w_gpu_fragment *
             score.gpu_fragment_cost +
@@ -236,7 +277,15 @@ GreedyScheduler::ServerScoreBreakdown GreedyScheduler::score_server(
         config_.server_score.w_cpu_fragment *
             score.cpu_fragment_cost +
         config_.server_score.w_memory_fragment *
-            score.memory_fragment_cost;
+            score.memory_fragment_cost +
+        config_.server_score.w_residual_imbalance *
+            score.residual_imbalance_cost +
+        config_.isolation_score.w_high_capacity_reserve *
+            score.high_capacity_reserve_cost +
+        config_.isolation_score.w_class_mismatch *
+            score.class_mismatch_cost -
+        config_.isolation_score.w_same_class_affinity *
+            score.same_class_affinity;
     return score;
 }
 
@@ -306,6 +355,16 @@ double GreedyScheduler::score_pending_task(
             features.inverse_duration;
 }
 
+bool GreedyScheduler::is_large_task(
+    int task_index,
+    const FeasiblePlacement& placement
+) const {
+    const Task& task = tasks_[task_index];
+    return placement.gpu_count >=
+               config_.isolation_score.large_task_gpu_threshold ||
+           task.min_gpu >= config_.isolation_score.large_task_gpu_threshold;
+}
+
 void GreedyScheduler::order_pending_tasks(
     std::vector<int>& pending_task_indices,
     long long current_time
@@ -358,7 +417,14 @@ bool GreedyScheduler::start_ready_tasks(
             servers_[choice.server_index].start(
                 task,
                 current_time,
-                choice.gpu_count
+                choice.gpu_count,
+                is_large_task(
+                    task_index,
+                    FeasiblePlacement{
+                        choice.server_index,
+                        choice.gpu_count,
+                    }
+                )
             );
         assignments.push_back(assignment);
         finish_events.push(FinishEvent{running});
