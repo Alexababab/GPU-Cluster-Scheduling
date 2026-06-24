@@ -27,18 +27,30 @@ add_executable(schedule_ops_test
     src/server_state.cpp
 )
 
+add_executable(benchmark_runner
+    experiments/benchmark_runner.cpp
+    src/io.cpp
+    src/scheduler.cpp
+    src/server_state.cpp
+    src/validator.cpp
+    src/metrics.cpp
+)
+
 target_include_directories(scheduler PRIVATE include)
 target_include_directories(validator PRIVATE include)
 target_include_directories(schedule_ops_test PRIVATE include)
+target_include_directories(benchmark_runner PRIVATE include)
 
 if(MSVC)
     target_compile_options(scheduler PRIVATE /W4 /permissive-)
     target_compile_options(validator PRIVATE /W4 /permissive-)
     target_compile_options(schedule_ops_test PRIVATE /W4 /permissive-)
+    target_compile_options(benchmark_runner PRIVATE /W4 /permissive-)
 else()
     target_compile_options(scheduler PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(validator PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(schedule_ops_test PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(benchmark_runner PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 if(MSVC)
