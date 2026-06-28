@@ -269,6 +269,17 @@ GreedyScheduler::ServerScoreBreakdown GreedyScheduler::score_server(
         }
     }
 
+    if (config_.memory_aware_score.enabled) {
+        const double waste_ratio =
+            static_cast<double>(unused_allocated_gpu_memory) /
+            static_cast<double>(std::max(1, allocated_gpu_memory));
+        const double duration_factor =
+            1.0 + config_.memory_aware_score.duration_log_scale *
+                      std::log1p(static_cast<double>(task.duration));
+        score.duration_memory_waste_cost =
+            waste_ratio * duration_factor;
+    }
+
     score.total =
         config_.server_score.w_gpu_fragment *
             score.gpu_fragment_cost +
@@ -285,7 +296,9 @@ GreedyScheduler::ServerScoreBreakdown GreedyScheduler::score_server(
         config_.isolation_score.w_class_mismatch *
             score.class_mismatch_cost -
         config_.isolation_score.w_same_class_affinity *
-            score.same_class_affinity;
+            score.same_class_affinity +
+        config_.memory_aware_score.w_duration_memory_waste *
+            score.duration_memory_waste_cost;
     return score;
 }
 

@@ -51,6 +51,7 @@ private:
         double high_capacity_reserve_cost = 0.0;
         double class_mismatch_cost = 0.0;
         double same_class_affinity = 0.0;
+        double duration_memory_waste_cost = 0.0;
         double total = 0.0;
     };
 

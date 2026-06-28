@@ -34,11 +34,18 @@ struct IsolationScoreConfig {
     double w_same_class_affinity = 0.0;
 };
 
+struct MemoryAwareScoreConfig {
+    bool enabled = false;
+    double w_duration_memory_waste = 0.0;
+    double duration_log_scale = 0.0;
+};
+
 struct SchedulerConfig {
     std::string name = "v1b_filter_score";
     TaskScoreConfig task_score;
     ServerScoreConfig server_score;
     IsolationScoreConfig isolation_score;
+    MemoryAwareScoreConfig memory_aware_score;
 };
 
 SchedulerConfig scheduler_config_from_name(const std::string& name);

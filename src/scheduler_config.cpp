@@ -85,6 +85,16 @@ SchedulerConfig scheduler_config_from_name(const std::string& name) {
         return config;
     }
 
+    if (name == "v1d" || name == "v1d_new_memory_aware_score") {
+        SchedulerConfig config =
+            scheduler_config_from_name("v1c_fragmentation_isolation");
+        config.name = "v1d_new_memory_aware_score";
+        config.memory_aware_score.enabled = true;
+        config.memory_aware_score.w_duration_memory_waste = 10.0;
+        config.memory_aware_score.duration_log_scale = 0.20;
+        return config;
+    }
+
     if (name == "custom") {
         const char* config_path_env =
             std::getenv("SCHEDULER_CONFIG_FILE");
@@ -178,6 +188,15 @@ SchedulerConfig scheduler_config_from_file(const std::string& path) {
                 parse_double(key, value);
         } else if (key == "w_same_class_affinity") {
             config.isolation_score.w_same_class_affinity =
+                parse_double(key, value);
+        } else if (key == "memory_aware_enabled") {
+            config.memory_aware_score.enabled =
+                parse_bool(key, value);
+        } else if (key == "w_duration_memory_waste") {
+            config.memory_aware_score.w_duration_memory_waste =
+                parse_double(key, value);
+        } else if (key == "duration_log_scale") {
+            config.memory_aware_score.duration_log_scale =
                 parse_double(key, value);
         } else {
             throw std::invalid_argument(
