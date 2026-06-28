@@ -41,4 +41,5 @@ struct RunningTask {
     int gpu_count = 0;
     int cpu_cores = 0;
     int memory = 0;
+    bool large_task = false;
 };

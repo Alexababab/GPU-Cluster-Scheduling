@@ -47,6 +47,10 @@ private:
         double gpu_memory_fragment_cost = 0.0;
         double cpu_fragment_cost = 0.0;
         double memory_fragment_cost = 0.0;
+        double residual_imbalance_cost = 0.0;
+        double high_capacity_reserve_cost = 0.0;
+        double class_mismatch_cost = 0.0;
+        double same_class_affinity = 0.0;
         double total = 0.0;
     };
 
@@ -76,6 +80,10 @@ private:
     double score_pending_task(
         int task_index,
         long long current_time
+    ) const;
+    bool is_large_task(
+        int task_index,
+        const FeasiblePlacement& placement
     ) const;
     ServerScoreBreakdown score_server(
         int task_index,
