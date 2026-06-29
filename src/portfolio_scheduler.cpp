@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 
@@ -13,15 +14,32 @@
 
 namespace {
 
-constexpr std::array<const char*, 8> kPortfolioConfigs = {
+constexpr std::array<const char*, 14> kPortfolioConfigs = {
     "v1b",
     "v1c",
     "v1d_light",
-    "v1d_mid",
     "v1d_strong",
     "wait_first",
     "memory_first",
     "finish_balanced",
+    "scarcity_first",
+    "short_job_first",
+    "heavy_area_first",
+    "wait_memory_balance",
+    "finish_aggressive",
+    "low_reserve_v1c",
+    "high_reserve_v1c",
+};
+
+constexpr const char* kDefaultSelector = "memory_safe";
+
+constexpr std::array<const char*, 6> kSelectorNames = {
+    "equal_sum",
+    "rank_sum",
+    "wait_safe",
+    "memory_safe",
+    "finish_safe",
+    "no_regret_guard",
 };
 
 double normalize(double value, double minimum, double maximum) {
@@ -32,10 +50,24 @@ double normalize(double value, double minimum, double maximum) {
     return (value - minimum) / range;
 }
 
+std::string resolve_selector() {
+    const char* environment =
+        std::getenv("SCHEDULER_PORTFOLIO_SELECTOR");
+    const std::string requested =
+        environment == nullptr ? "" : environment;
+    for (const char* selector : kSelectorNames) {
+        if (requested == selector) {
+            return requested;
+        }
+    }
+    return kDefaultSelector;
+}
+
 }  // namespace
 
 PortfolioScheduler::PortfolioScheduler(const Instance& instance)
-    : instance_(instance) {}
+    : instance_(instance),
+      selector_name_(resolve_selector()) {}
 
 PortfolioScheduler::Candidate PortfolioScheduler::run_candidate(
     const std::string& config_name
@@ -112,26 +144,68 @@ std::vector<Assignment> PortfolioScheduler::solve() {
         }
 
         for (Candidate& candidate : candidates) {
-            candidate.normalized_score =
-                normalize(candidate.e_wait, min_wait, max_wait) +
-                normalize(
-                    candidate.e_memory_new,
-                    min_memory,
-                    max_memory
-                ) +
-                normalize(
-                    static_cast<double>(candidate.e_finish),
-                    min_finish,
-                    max_finish
+            candidate.norm_wait =
+                normalize(candidate.e_wait, min_wait, max_wait);
+            candidate.norm_memory = normalize(
+                candidate.e_memory_new,
+                min_memory,
+                max_memory
+            );
+            candidate.norm_finish = normalize(
+                static_cast<double>(candidate.e_finish),
+                min_finish,
+                max_finish
+            );
+
+            const double equal_sum =
+                candidate.norm_wait +
+                candidate.norm_memory +
+                candidate.norm_finish;
+            candidate.secondary_score = equal_sum;
+
+            if (selector_name_ == "rank_sum") {
+                double rank_sum = 0.0;
+                for (const Candidate& other : candidates) {
+                    rank_sum += other.e_wait < candidate.e_wait ? 1.0 : 0.0;
+                    rank_sum += other.e_memory_new < candidate.e_memory_new
+                                    ? 1.0
+                                    : 0.0;
+                    rank_sum += other.e_finish < candidate.e_finish
+                                    ? 1.0
+                                    : 0.0;
+                }
+                candidate.primary_score = rank_sum;
+            } else if (selector_name_ == "wait_safe") {
+                candidate.primary_score =
+                    1.3 * candidate.norm_wait +
+                    candidate.norm_memory + candidate.norm_finish;
+            } else if (selector_name_ == "memory_safe") {
+                candidate.primary_score =
+                    candidate.norm_wait +
+                    1.3 * candidate.norm_memory + candidate.norm_finish;
+            } else if (selector_name_ == "finish_safe") {
+                candidate.primary_score =
+                    candidate.norm_wait + candidate.norm_memory +
+                    1.3 * candidate.norm_finish;
+            } else if (selector_name_ == "no_regret_guard") {
+                candidate.primary_score = std::max(
+                    candidate.norm_wait,
+                    std::max(candidate.norm_memory, candidate.norm_finish)
                 );
+            } else {
+                candidate.primary_score = equal_sum;
+            }
         }
 
         const auto best = std::min_element(
             candidates.begin(),
             candidates.end(),
             [](const Candidate& left, const Candidate& right) {
-                if (left.normalized_score != right.normalized_score) {
-                    return left.normalized_score < right.normalized_score;
+                if (left.primary_score != right.primary_score) {
+                    return left.primary_score < right.primary_score;
+                }
+                if (left.secondary_score != right.secondary_score) {
+                    return left.secondary_score < right.secondary_score;
                 }
                 return left.config_name < right.config_name;
             }
@@ -145,4 +219,8 @@ std::vector<Assignment> PortfolioScheduler::solve() {
 
 const std::string& PortfolioScheduler::selected_config() const {
     return selected_config_;
+}
+
+const std::string& PortfolioScheduler::selector_name() const {
+    return selector_name_;
 }

@@ -136,6 +136,69 @@ SchedulerConfig scheduler_config_from_name(const std::string& name) {
         return config;
     }
 
+    if (name == "scarcity_first") {
+        SchedulerConfig config = scheduler_config_from_name("v1d_light");
+        config.name = name;
+        config.task_score.w_scarcity = 110.0;
+        config.task_score.w_wait = 0.018;
+        config.task_score.w_area = 0.12;
+        return config;
+    }
+
+    if (name == "short_job_first") {
+        SchedulerConfig config = scheduler_config_from_name("v1d_light");
+        config.name = name;
+        config.task_score.w_scarcity = 30.0;
+        config.task_score.w_area = 1.15;
+        config.task_score.w_short_job = 40.0;
+        return config;
+    }
+
+    if (name == "heavy_area_first") {
+        SchedulerConfig config = scheduler_config_from_name("v1d_mid");
+        config.name = name;
+        config.task_score.w_wait = 0.022;
+        config.task_score.w_area = -0.65;
+        config.task_score.w_short_job = 0.0;
+        return config;
+    }
+
+    if (name == "wait_memory_balance") {
+        SchedulerConfig config = scheduler_config_from_name("v1d_mid");
+        config.name = name;
+        config.task_score.w_wait = 0.028;
+        config.memory_aware_score.w_duration_memory_waste = 12.0;
+        return config;
+    }
+
+    if (name == "finish_aggressive") {
+        SchedulerConfig config = scheduler_config_from_name("v1d_light");
+        config.name = name;
+        config.task_score.w_scarcity = 24.0;
+        config.task_score.w_wait = 0.012;
+        config.task_score.w_area = 1.55;
+        config.task_score.w_short_job = 60.0;
+        config.server_score.w_gpu_fragment = 6.0;
+        return config;
+    }
+
+    if (name == "low_reserve_v1c") {
+        SchedulerConfig config = scheduler_config_from_name("v1c");
+        config.name = name;
+        config.isolation_score.w_high_capacity_reserve = 1.5;
+        config.isolation_score.w_class_mismatch = 2.0;
+        return config;
+    }
+
+    if (name == "high_reserve_v1c") {
+        SchedulerConfig config = scheduler_config_from_name("v1c");
+        config.name = name;
+        config.isolation_score.w_high_capacity_reserve = 9.0;
+        config.isolation_score.w_class_mismatch = 4.0;
+        config.isolation_score.w_same_class_affinity = 1.0;
+        return config;
+    }
+
     if (name == "custom") {
         const char* config_path_env =
             std::getenv("SCHEDULER_CONFIG_FILE");

@@ -26,6 +26,8 @@ int main() {
                 std::string(trace_environment) == "1") {
                 std::cerr << "portfolio_selected="
                           << scheduler.selected_config() << '\n';
+                std::cerr << "portfolio_selector="
+                          << scheduler.selector_name() << '\n';
             }
             write_schedule(std::cout, schedule);
             return 0;

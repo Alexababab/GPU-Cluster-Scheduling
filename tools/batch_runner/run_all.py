@@ -29,6 +29,7 @@ class RunResult:
     e_memory_new: float | None = None
     e_finish: float | None = None
     selected_config: str = ""
+    selected_selector: str = ""
     error: str = ""
 
     @property
@@ -95,6 +96,8 @@ def run_scheduler(
         for line in stderr_lines:
             if line.startswith("portfolio_selected="):
                 result.selected_config = line.split("=", 1)[1].strip()
+            elif line.startswith("portfolio_selector="):
+                result.selected_selector = line.split("=", 1)[1].strip()
             elif line.strip():
                 remaining_stderr.append(line.strip())
         if remaining_stderr:
@@ -204,6 +207,7 @@ def write_metadata(path: Path, result: RunResult) -> None:
         "E_memory_new": result.e_memory_new,
         "E_finish": result.e_finish,
         "selected_config": result.selected_config,
+        "selected_selector": result.selected_selector,
         "error": result.error,
     }
     text = "".join(f"{key}={value}\n" for key, value in fields.items())
@@ -229,6 +233,7 @@ def export_csv(path: Path, results: list[RunResult]) -> None:
                 "E_memory_new",
                 "E_finish",
                 "selected_config",
+                "selected_selector",
                 "error",
             ]
         )
@@ -256,6 +261,7 @@ def export_csv(path: Path, results: list[RunResult]) -> None:
                     else "",
                     result.e_finish if result.e_finish is not None else "",
                     result.selected_config,
+                    result.selected_selector,
                     result.error,
                 ]
             )
