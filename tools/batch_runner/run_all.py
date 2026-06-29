@@ -25,8 +25,10 @@ class RunResult:
     task_count: int = 0
     is_legal: bool | None = None
     e_wait: float | None = None
-    e_memory: float | None = None
+    e_memory_old: float | None = None
+    e_memory_new: float | None = None
     e_finish: float | None = None
+    selected_config: str = ""
     error: str = ""
 
     @property
@@ -75,6 +77,11 @@ def run_scheduler(
                             if scheduler_config
                             else {}
                         ),
+                        **(
+                            {"SCHEDULER_TRACE_SELECTION": "1"}
+                            if scheduler_config == "portfolio"
+                            else {}
+                        ),
                     },
                 )
         result.elapsed_sec = time.perf_counter() - start
@@ -83,8 +90,15 @@ def run_scheduler(
             1
             for _ in output_path.open("r", encoding="utf-8")
         )
-        if process.stderr.strip():
-            result.error = process.stderr.strip()[:500]
+        stderr_lines = process.stderr.strip().splitlines()
+        remaining_stderr: list[str] = []
+        for line in stderr_lines:
+            if line.startswith("portfolio_selected="):
+                result.selected_config = line.split("=", 1)[1].strip()
+            elif line.strip():
+                remaining_stderr.append(line.strip())
+        if remaining_stderr:
+            result.error = "\n".join(remaining_stderr)[:500]
     except subprocess.TimeoutExpired:
         result.elapsed_sec = time.perf_counter() - start
         result.exit_code = -1
@@ -154,7 +168,12 @@ def run_validator(
             return
 
         result.e_wait = float(payload["E_wait"])
-        result.e_memory = float(payload["E_memory"])
+        result.e_memory_old = float(
+            payload.get("E_memory_old", payload["E_memory"])
+        )
+        result.e_memory_new = float(
+            payload.get("E_memory_new", payload["E_memory"])
+        )
         result.e_finish = float(payload["E_finish"])
     except subprocess.TimeoutExpired:
         result.is_legal = False
@@ -180,8 +199,11 @@ def write_metadata(path: Path, result: RunResult) -> None:
         "task_count": result.task_count,
         "is_legal": result.is_legal,
         "E_wait": result.e_wait,
-        "E_memory": result.e_memory,
+        "E_memory": result.e_memory_new,
+        "E_memory_old": result.e_memory_old,
+        "E_memory_new": result.e_memory_new,
         "E_finish": result.e_finish,
+        "selected_config": result.selected_config,
         "error": result.error,
     }
     text = "".join(f"{key}={value}\n" for key, value in fields.items())
@@ -203,7 +225,10 @@ def export_csv(path: Path, results: list[RunResult]) -> None:
                 "is_legal",
                 "E_wait",
                 "E_memory",
+                "E_memory_old",
+                "E_memory_new",
                 "E_finish",
+                "selected_config",
                 "error",
             ]
         )
@@ -220,8 +245,17 @@ def export_csv(path: Path, results: list[RunResult]) -> None:
                     if result.is_legal is not None
                     else "",
                     result.e_wait if result.e_wait is not None else "",
-                    result.e_memory if result.e_memory is not None else "",
+                    result.e_memory_new
+                    if result.e_memory_new is not None
+                    else "",
+                    result.e_memory_old
+                    if result.e_memory_old is not None
+                    else "",
+                    result.e_memory_new
+                    if result.e_memory_new is not None
+                    else "",
                     result.e_finish if result.e_finish is not None else "",
+                    result.selected_config,
                     result.error,
                 ]
             )

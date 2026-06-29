@@ -1,5 +1,6 @@
 #!/usr/bin/env sh
 set -eu
+export SCHEDULER_CONFIG="${SCHEDULER_CONFIG:-portfolio}"
 
 cd "$(dirname "$0")"
 

@@ -36,5 +36,5 @@ The final preset uses `w_duration_memory_waste=10.0` and
 - `E_finish`: -2.41 on average; 28 improved, 20 regressed, 52 tied;
 - average scheduler runtime: 0.102 seconds in the final V1d run.
 
-The submission package is generated with `SUBMISSION_CONFIG=v1d`. This only
-changes the packaged `run.sh`; the repository's default profile remains V1b.
+V1d remains available as a standalone baseline. The rank-push branch defaults
+to the portfolio profile, which includes V1d variants among its candidates.

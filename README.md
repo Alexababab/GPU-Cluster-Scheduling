@@ -34,7 +34,8 @@ python3 tools/batch_runner/run_all.py path/to/dataset
 ```
 
 批处理工具会依次调用 `build/scheduler` 和 `build/validator`，并将合法性、
-`E_wait`、`E_memory`、`E_finish` 与运行时间写入汇总 CSV。任一实例运行失败、
+`E_wait`、`E_memory_old`、`E_memory_new`、`E_finish` 与运行时间写入汇总 CSV。
+兼容列 `E_memory` 等于 `E_memory_new`。任一实例运行失败、
 超时或验证失败时，批处理命令返回非零退出码。
 
 ## 调度配置
@@ -46,12 +47,16 @@ SCHEDULER_CONFIG=v0 sh run.sh < case.in
 SCHEDULER_CONFIG=v1a sh run.sh < case.in
 SCHEDULER_CONFIG=v1b sh run.sh < case.in
 SCHEDULER_CONFIG=v1c sh run.sh < case.in
+SCHEDULER_CONFIG=v1d sh run.sh < case.in
+SCHEDULER_CONFIG=portfolio sh run.sh < case.in
 ```
 
 - `v0`：原始任务顺序和 V0 best-fit，用于回归；
 - `v1a`：优先级、等待时间、稀缺度和任务面积排序；
-- `v1b`：V1a 排序加多维 Filter + Score，当前默认配置。
+- `v1b`：V1a 排序加多维 Filter + Score，用于历史基线。
 - `v1c`：V1b 加大小任务隔离和多维资源碎片控制，用于实验对比。
+- `v1d`：V1c 加任务时长感知的显存贴合评分。
+- `portfolio`：内部评估八个合法候选并选择三指标归一化得分最低者，当前默认配置。
 
 正式评测约束：
 

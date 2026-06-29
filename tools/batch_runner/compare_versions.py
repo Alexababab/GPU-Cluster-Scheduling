@@ -84,7 +84,9 @@ def read_csv(path: Path) -> dict[str, InstanceMetrics]:
                 elapsed_sec=float(row.get("elapsed_sec") or 0.0),
                 is_legal=parse_bool(row.get("is_legal")),
                 e_wait=parse_float(row.get("E_wait")),
-                e_memory=parse_float(row.get("E_memory")),
+                e_memory=parse_float(
+                    row.get("E_memory_new") or row.get("E_memory")
+                ),
                 e_finish=parse_float(row.get("E_finish")),
             )
     return metrics
@@ -107,7 +109,9 @@ def read_meta_dir(path: Path) -> dict[str, InstanceMetrics]:
             elapsed_sec=float(fields.get("elapsed_sec") or 0.0),
             is_legal=parse_bool(fields.get("is_legal")),
             e_wait=parse_float(fields.get("E_wait")),
-            e_memory=parse_float(fields.get("E_memory")),
+            e_memory=parse_float(
+                fields.get("E_memory_new") or fields.get("E_memory")
+            ),
             e_finish=parse_float(fields.get("E_finish")),
         )
     return metrics

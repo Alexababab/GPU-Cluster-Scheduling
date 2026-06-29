@@ -40,7 +40,7 @@ else
     exit 127
 fi
 
-SUBMISSION_CONFIG="${SUBMISSION_CONFIG:-v1d}" \
+SUBMISSION_CONFIG="${SUBMISSION_CONFIG:-portfolio}" \
     "$PYTHON" tools/package_submission.py
 
 echo ""
