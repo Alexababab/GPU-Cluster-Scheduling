@@ -45,11 +45,13 @@ python3 tools/batch_runner/run_all.py path/to/dataset
 SCHEDULER_CONFIG=v0 sh run.sh < case.in
 SCHEDULER_CONFIG=v1a sh run.sh < case.in
 SCHEDULER_CONFIG=v1b sh run.sh < case.in
+SCHEDULER_CONFIG=v1c sh run.sh < case.in
 ```
 
 - `v0`：原始任务顺序和 V0 best-fit，用于回归；
 - `v1a`：优先级、等待时间、稀缺度和任务面积排序；
 - `v1b`：V1a 排序加多维 Filter + Score，当前默认配置。
+- `v1c`：V1b 加大小任务隔离和多维资源碎片控制，用于实验对比。
 
 正式评测约束：
 
