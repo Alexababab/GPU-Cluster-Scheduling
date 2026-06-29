@@ -31,7 +31,17 @@ fi
 
 # ---- 打包 ----
 echo "[2/2] 生成提交包..."
-/mnt/d/workspace/venv/bin/python3 tools/package_submission.py
+if command -v python3 >/dev/null 2>&1; then
+    PYTHON=python3
+elif command -v python >/dev/null 2>&1; then
+    PYTHON=python
+else
+    echo "Python 3 not found" >&2
+    exit 127
+fi
+
+SUBMISSION_CONFIG="${SUBMISSION_CONFIG:-v1d}" \
+    "$PYTHON" tools/package_submission.py
 
 echo ""
 echo "=========================================="

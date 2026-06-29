@@ -27,12 +27,30 @@ import zipfile
 from pathlib import Path
 from typing import List, Tuple
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # ---------------------------------------------------------------------------
 # 配置
 # ---------------------------------------------------------------------------
 
 TEAM_NAME = "team24"
 OUTPUT_ZIP = "team24.zip"
+SUBMISSION_CONFIG = os.environ.get("SUBMISSION_CONFIG", "v1d")
+
+ROOT_FILES = [
+    "build.sh",
+    "run.sh",
+    "CMakeLists.txt",
+    "README.md",
+]
+
+SOURCE_DIRS = [
+    "include",
+    "src",
+]
 
 # 需要排除的文件/目录模式
 EXCLUDE_PATTERNS = [
@@ -106,42 +124,23 @@ def collect_files(project_root: str) -> List[Tuple[str, str]]:
 
     返回 [(磁盘路径, ZIP内路径), ...]，ZIP内路径使用 / 分隔符。
 
-    遍历 project_root 下所有文件，排除匹配 EXCLUDE_PATTERNS 的路径。
-    ZIP 内路径前缀为 team24/。
+    只收集评测所需的根文件、头文件和源文件。
     """
     files: List[Tuple[str, str]] = []
 
-    for dirpath, dirnames, filenames in os.walk(project_root):
-        # 计算相对于项目根的路径（用 / 分隔）
-        rel_dir = os.path.relpath(dirpath, project_root)
-        if rel_dir == ".":
-            rel_dir = ""
-        else:
-            rel_dir = rel_dir.replace("\\", "/") + "/"
+    for relpath in ROOT_FILES:
+        disk_path = os.path.join(project_root, relpath)
+        if os.path.isfile(disk_path):
+            files.append((disk_path, f"{TEAM_NAME}/{relpath}"))
 
-        # 跳过被排除的目录（就地修改 dirnames 阻止深入遍历）
-        dirnames_to_remove = []
-        for d in dirnames:
-            check_path = rel_dir + d + "/"
-            if should_exclude(check_path):
-                dirnames_to_remove.append(d)
-        for d in dirnames_to_remove:
-            dirnames.remove(d)
-
-        # 跳过自身被排除的目录
-        if rel_dir and should_exclude(rel_dir):
-            continue
-
-        for f in filenames:
-            relpath = rel_dir + f
-            if should_exclude(relpath):
-                continue
-
-            disk_path = os.path.join(dirpath, f)
-            zip_path = f"{TEAM_NAME}/{relpath}"
-            # 确保 ZIP 内路径使用正斜杠
-            zip_path = zip_path.replace("\\", "/")
-            files.append((disk_path, zip_path))
+    for source_dir in SOURCE_DIRS:
+        source_root = os.path.join(project_root, source_dir)
+        for dirpath, _, filenames in os.walk(source_root):
+            for filename in filenames:
+                disk_path = os.path.join(dirpath, filename)
+                relpath = os.path.relpath(disk_path, project_root)
+                relpath = relpath.replace("\\", "/")
+                files.append((disk_path, f"{TEAM_NAME}/{relpath}"))
 
     return files
 
@@ -165,7 +164,19 @@ def create_package(project_root: str, output_path: str) -> List[str]:
 
     with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for disk_path, zip_path in files:
-            zf.write(disk_path, zip_path)
+            if zip_path == f"{TEAM_NAME}/run.sh":
+                run_script = Path(disk_path).read_text(encoding="utf-8")
+                marker = "set -eu\n"
+                injected = (
+                    marker
+                    + f'export SCHEDULER_CONFIG="${{SCHEDULER_CONFIG:-{SUBMISSION_CONFIG}}}"\n'
+                )
+                if marker not in run_script:
+                    raise RuntimeError("run.sh is missing the set -eu marker")
+                run_script = run_script.replace(marker, injected, 1)
+                zf.writestr(zip_path, run_script.encode("utf-8"))
+            else:
+                zf.write(disk_path, zip_path)
 
     # 输出文件大小
     size_kb = os.path.getsize(output_path) / 1024

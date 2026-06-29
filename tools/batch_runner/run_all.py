@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import subprocess
 import sys
 import time
@@ -48,6 +49,7 @@ def run_scheduler(
     output_path: Path,
     scheduler_path: Path,
     timeout_sec: int,
+    scheduler_config: str | None,
 ) -> RunResult:
     result = RunResult(
         case_name=input_path.name,
@@ -66,6 +68,14 @@ def run_scheduler(
                     timeout=timeout_sec,
                     text=True,
                     encoding="utf-8",
+                    env={
+                        **os.environ,
+                        **(
+                            {"SCHEDULER_CONFIG": scheduler_config}
+                            if scheduler_config
+                            else {}
+                        ),
+                    },
                 )
         result.elapsed_sec = time.perf_counter() - start
         result.exit_code = process.returncode
@@ -226,7 +236,7 @@ def print_summary(results: list[RunResult]) -> None:
     ]
 
     print("\n" + "=" * 60)
-    print("V0 batch summary")
+    print("Batch summary")
     print("=" * 60)
     print(f"cases:        {len(results)}")
     print(f"passed:       {len(passed)}/{len(results)}")
@@ -258,6 +268,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scheduler", type=Path, default=Path("build/scheduler"))
     parser.add_argument("--validator", type=Path, default=Path("build/validator"))
     parser.add_argument("--csv", type=Path)
+    parser.add_argument("--scheduler-config")
     return parser.parse_args()
 
 
@@ -298,6 +309,7 @@ def main() -> int:
     print(f"outputs:   {output_dir}")
     print(f"scheduler: {scheduler_path}")
     print(f"validator: {validator_path}")
+    print(f"config:    {args.scheduler_config or '(inherited/default)'}")
     print(f"timeout:   {args.timeout}s")
     print("-" * 60)
 
@@ -309,6 +321,7 @@ def main() -> int:
             output_path,
             scheduler_path,
             args.timeout,
+            args.scheduler_config,
         )
         run_validator(
             result,
