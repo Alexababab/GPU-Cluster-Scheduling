@@ -12,6 +12,9 @@ add_executable(scheduler
     src/scheduler_config.cpp
     src/server_state.cpp
     src/scheduler.cpp
+    src/portfolio_scheduler.cpp
+    src/validator.cpp
+    src/metrics.cpp
 )
 
 add_executable(validator

@@ -95,6 +95,47 @@ SchedulerConfig scheduler_config_from_name(const std::string& name) {
         return config;
     }
 
+    if (name == "v1d_light" || name == "v1d_mid" ||
+        name == "v1d_strong") {
+        SchedulerConfig config = scheduler_config_from_name("v1d");
+        config.name = name;
+        if (name == "v1d_light") {
+            config.memory_aware_score.w_duration_memory_waste = 4.0;
+        } else if (name == "v1d_strong") {
+            config.memory_aware_score.w_duration_memory_waste = 15.0;
+        }
+        return config;
+    }
+
+    if (name == "wait_first") {
+        SchedulerConfig config = scheduler_config_from_name("v1d_light");
+        config.name = name;
+        config.task_score.w_priority = 3.0;
+        config.task_score.w_wait = 0.035;
+        config.task_score.w_scarcity = 50.0;
+        config.task_score.w_area = 0.08;
+        return config;
+    }
+
+    if (name == "memory_first") {
+        SchedulerConfig config = scheduler_config_from_name("v1d_strong");
+        config.name = name;
+        config.server_score.w_gpu_memory_fragment = 4.0;
+        config.memory_aware_score.w_duration_memory_waste = 24.0;
+        return config;
+    }
+
+    if (name == "finish_balanced") {
+        SchedulerConfig config = scheduler_config_from_name("v1d_mid");
+        config.name = name;
+        config.task_score.w_wait = 0.018;
+        config.task_score.w_area = 0.85;
+        config.task_score.w_short_job = 12.0;
+        config.server_score.w_gpu_fragment = 5.0;
+        config.server_score.w_residual_imbalance = 1.0;
+        return config;
+    }
+
     if (name == "custom") {
         const char* config_path_env =
             std::getenv("SCHEDULER_CONFIG_FILE");

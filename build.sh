@@ -17,7 +17,8 @@ fi
 "$CXX" -std=c++17 -O2 -Wall -Wextra -Wpedantic \
     -Iinclude \
     src/main.cpp src/io.cpp src/scheduler_config.cpp \
-    src/server_state.cpp src/scheduler.cpp \
+    src/server_state.cpp src/scheduler.cpp src/portfolio_scheduler.cpp \
+    src/validator.cpp src/metrics.cpp \
     -o build/scheduler
 
 "$CXX" -std=c++17 -O2 -Wall -Wextra -Wpedantic \

@@ -13,7 +13,8 @@ MetricsCalculator::MetricsCalculator(const vector<Server>& servers,
 ThreeMetrics MetricsCalculator::calculate(const vector<Assignment>& schedule) const {
     return {
         calcWaitMetric(schedule),
-        calcMemoryMetric(schedule),
+        calcMemoryMetricOld(schedule),
+        calcMemoryMetricNew(schedule),
         calcFinishMetric(schedule)
     };
 }
@@ -35,7 +36,7 @@ double MetricsCalculator::calcWaitMetric(const vector<Assignment>& schedule) con
     return total;
 }
 
-double MetricsCalculator::calcMemoryMetric(const vector<Assignment>& schedule) const {
+double MetricsCalculator::calcMemoryMetricOld(const vector<Assignment>& schedule) const {
     unordered_map<int, Server> server_map;
     for (const auto& s : servers_) server_map[s.id] = s;
     unordered_map<int, Task> task_map;
@@ -86,6 +87,33 @@ double MetricsCalculator::calcMemoryMetric(const vector<Assignment>& schedule) c
 
     if (total_span == 0) return 0.0;
     return total_idle / static_cast<double>(total_span);
+}
+
+double MetricsCalculator::calcMemoryMetricNew(
+    const vector<Assignment>& schedule
+) const {
+    unordered_map<int, Server> server_map;
+    for (const auto& server : servers_) server_map[server.id] = server;
+    unordered_map<int, Task> task_map;
+    for (const auto& task : tasks_) task_map[task.id] = task;
+
+    long double total = 0.0L;
+    for (const auto& assignment : schedule) {
+        const auto server_it = server_map.find(assignment.server_id);
+        const auto task_it = task_map.find(assignment.task_id);
+        if (server_it == server_map.end() || task_it == task_map.end()) {
+            continue;
+        }
+        const Server& server = server_it->second;
+        const Task& task = task_it->second;
+        const long long allocated_gpu_memory =
+            1LL * assignment.gpu_count * server.gpu_memory;
+        const long long wasted_gpu_memory =
+            allocated_gpu_memory - task.total_gpu_memory;
+        total += static_cast<long double>(task.duration) *
+                 static_cast<long double>(wasted_gpu_memory);
+    }
+    return static_cast<double>(total);
 }
 
 long long MetricsCalculator::calcFinishMetric(const vector<Assignment>& schedule) const {

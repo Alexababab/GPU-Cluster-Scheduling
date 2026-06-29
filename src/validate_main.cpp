@@ -67,7 +67,9 @@ int main(int argc, char* argv[]) {
             MetricsCalculator calc(instance.servers, instance.tasks);
             ThreeMetrics metrics = calc.calculate(schedule);
             cout << ",\"E_wait\":" << metrics.E_wait
-                 << ",\"E_memory\":" << metrics.E_memory
+                 << ",\"E_memory\":" << metrics.E_memory_new
+                 << ",\"E_memory_old\":" << metrics.E_memory_old
+                 << ",\"E_memory_new\":" << metrics.E_memory_new
                  << ",\"E_finish\":" << metrics.E_finish;
         }
 
@@ -77,7 +79,8 @@ int main(int argc, char* argv[]) {
             MetricsCalculator calc(instance.servers, instance.tasks);
             ThreeMetrics metrics = calc.calculate(schedule);
             cerr << "[metrics] E_wait=" << metrics.E_wait
-                 << " E_memory=" << metrics.E_memory
+                 << " E_memory_old=" << metrics.E_memory_old
+                 << " E_memory_new=" << metrics.E_memory_new
                  << " E_finish=" << metrics.E_finish << "\n";
         }
 

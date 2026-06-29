@@ -38,7 +38,7 @@ if hasattr(sys.stderr, "reconfigure"):
 
 TEAM_NAME = "team24"
 OUTPUT_ZIP = "team24.zip"
-SUBMISSION_CONFIG = os.environ.get("SUBMISSION_CONFIG", "v1d")
+SUBMISSION_CONFIG = os.environ.get("SUBMISSION_CONFIG", "portfolio")
 
 ROOT_FILES = [
     "build.sh",
@@ -167,13 +167,22 @@ def create_package(project_root: str, output_path: str) -> List[str]:
             if zip_path == f"{TEAM_NAME}/run.sh":
                 run_script = Path(disk_path).read_text(encoding="utf-8")
                 marker = "set -eu\n"
-                injected = (
-                    marker
-                    + f'export SCHEDULER_CONFIG="${{SCHEDULER_CONFIG:-{SUBMISSION_CONFIG}}}"\n'
+                config_line = (
+                    f'export SCHEDULER_CONFIG="${{SCHEDULER_CONFIG:-{SUBMISSION_CONFIG}}}"'
                 )
                 if marker not in run_script:
                     raise RuntimeError("run.sh is missing the set -eu marker")
-                run_script = run_script.replace(marker, injected, 1)
+                lines = run_script.splitlines()
+                replaced = False
+                for index, line in enumerate(lines):
+                    if line.startswith("export SCHEDULER_CONFIG="):
+                        lines[index] = config_line
+                        replaced = True
+                        break
+                if not replaced:
+                    marker_index = lines.index("set -eu")
+                    lines.insert(marker_index + 1, config_line)
+                run_script = "\n".join(lines) + "\n"
                 zf.writestr(zip_path, run_script.encode("utf-8"))
             else:
                 zf.write(disk_path, zip_path)
