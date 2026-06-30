@@ -17,9 +17,14 @@ int main() {
         const char* config_environment = std::getenv("SCHEDULER_CONFIG");
         const std::string config_name =
             config_environment == nullptr ? "v1b" : config_environment;
-        if (config_name == "portfolio") {
+        if (config_name == "portfolio" ||
+            config_name == "portfolio_v2_2" ||
+            config_name == "portfolio_v3") {
             PortfolioScheduler scheduler(instance);
-            const std::vector<Assignment> schedule = scheduler.solve();
+            const std::vector<Assignment> schedule =
+                config_name == "portfolio_v2_2"
+                    ? scheduler.solve()
+                    : scheduler.solve_with_repairs();
             const char* trace_environment =
                 std::getenv("SCHEDULER_TRACE_SELECTION");
             if (trace_environment != nullptr &&
@@ -28,6 +33,8 @@ int main() {
                           << scheduler.selected_config() << '\n';
                 std::cerr << "portfolio_selector="
                           << scheduler.selector_name() << '\n';
+                std::cerr << "portfolio_candidates="
+                          << scheduler.valid_candidates() << '\n';
             }
             write_schedule(std::cout, schedule);
             return 0;

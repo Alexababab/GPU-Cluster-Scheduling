@@ -30,6 +30,7 @@ class RunResult:
     e_finish: float | None = None
     selected_config: str = ""
     selected_selector: str = ""
+    valid_candidates: str = ""
     error: str = ""
 
     @property
@@ -80,7 +81,11 @@ def run_scheduler(
                         ),
                         **(
                             {"SCHEDULER_TRACE_SELECTION": "1"}
-                            if scheduler_config == "portfolio"
+                            if scheduler_config in {
+                                "portfolio",
+                                "portfolio_v2_2",
+                                "portfolio_v3",
+                            }
                             else {}
                         ),
                     },
@@ -98,6 +103,8 @@ def run_scheduler(
                 result.selected_config = line.split("=", 1)[1].strip()
             elif line.startswith("portfolio_selector="):
                 result.selected_selector = line.split("=", 1)[1].strip()
+            elif line.startswith("portfolio_candidates="):
+                result.valid_candidates = line.split("=", 1)[1].strip()
             elif line.strip():
                 remaining_stderr.append(line.strip())
         if remaining_stderr:
@@ -208,6 +215,7 @@ def write_metadata(path: Path, result: RunResult) -> None:
         "E_finish": result.e_finish,
         "selected_config": result.selected_config,
         "selected_selector": result.selected_selector,
+        "valid_candidates": result.valid_candidates,
         "error": result.error,
     }
     text = "".join(f"{key}={value}\n" for key, value in fields.items())
@@ -234,6 +242,7 @@ def export_csv(path: Path, results: list[RunResult]) -> None:
                 "E_finish",
                 "selected_config",
                 "selected_selector",
+                "valid_candidates",
                 "error",
             ]
         )
@@ -262,6 +271,7 @@ def export_csv(path: Path, results: list[RunResult]) -> None:
                     result.e_finish if result.e_finish is not None else "",
                     result.selected_config,
                     result.selected_selector,
+                    result.valid_candidates,
                     result.error,
                 ]
             )

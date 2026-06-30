@@ -8,10 +8,12 @@
 
 GreedyScheduler::GreedyScheduler(
     const Instance& instance,
-    SchedulerConfig config
+    SchedulerConfig config,
+    std::unordered_map<int, double> task_boosts
 )
     : config_(std::move(config)),
-      tasks_(instance.tasks) {
+      tasks_(instance.tasks),
+      task_boosts_(std::move(task_boosts)) {
     std::sort(
         tasks_.begin(),
         tasks_.end(),
@@ -354,6 +356,10 @@ double GreedyScheduler::score_pending_task(
     const long long wait_time =
         std::max(0LL, current_time - task.release_time);
 
+    const auto boost_it = task_boosts_.find(task.id);
+    const double boost =
+        boost_it == task_boosts_.end() ? 0.0 : boost_it->second;
+
     return
         config_.task_score.w_priority *
             static_cast<double>(task.weight) +
@@ -365,7 +371,8 @@ double GreedyScheduler::score_pending_task(
         config_.task_score.w_area *
             features.log_area +
         config_.task_score.w_short_job *
-            features.inverse_duration;
+            features.inverse_duration +
+        boost;
 }
 
 bool GreedyScheduler::is_large_task(

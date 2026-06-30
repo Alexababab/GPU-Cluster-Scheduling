@@ -56,7 +56,9 @@ SCHEDULER_CONFIG=portfolio sh run.sh < case.in
 - `v1b`：V1a 排序加多维 Filter + Score，用于历史基线。
 - `v1c`：V1b 加大小任务隔离和多维资源碎片控制，用于实验对比。
 - `v1d`：V1c 加任务时长感知的显存贴合评分。
-- `portfolio`：内部评估十四个合法候选并选择三指标得分最低者，当前默认配置。
+- `portfolio`：先运行 V2.2 十四候选，再加入四个 repair candidates，当前默认配置。
+- `portfolio_v2_2`：不启用 repair 的 V2.2 明确回退入口。
+- `portfolio_v3`：与当前默认 `portfolio` 等价的 V3 显式入口。
 
 Portfolio 默认使用 `memory_safe` selector，也可通过环境变量覆盖：
 

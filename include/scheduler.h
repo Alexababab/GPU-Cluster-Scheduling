@@ -1,6 +1,7 @@
 #pragma once
 
 #include <queue>
+#include <unordered_map>
 #include <vector>
 
 #include "model.h"
@@ -11,7 +12,8 @@ class GreedyScheduler {
 public:
     explicit GreedyScheduler(
         const Instance& instance,
-        SchedulerConfig config = SchedulerConfig{}
+        SchedulerConfig config = SchedulerConfig{},
+        std::unordered_map<int, double> task_boosts = {}
     );
 
     std::vector<Assignment> solve();
@@ -100,4 +102,5 @@ private:
     std::vector<ServerState> servers_;
     std::vector<std::vector<FeasiblePlacement>> feasible_placements_;
     std::vector<TaskFeatures> task_features_;
+    std::unordered_map<int, double> task_boosts_;
 };
