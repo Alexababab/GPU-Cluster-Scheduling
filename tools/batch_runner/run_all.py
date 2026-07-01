@@ -32,6 +32,10 @@ class RunResult:
     selected_selector: str = ""
     valid_candidates: str = ""
     candidate_metrics: str = ""
+    profile: str = ""
+    cheap_candidate_count: int = 0
+    repair_candidate_count: int = 0
+    guard_triggered: bool = False
     error: str = ""
 
     @property
@@ -89,7 +93,8 @@ def run_scheduler(
                                 "portfolio_v3_full",
                                 "portfolio_v4",
                                 "portfolio_v5",
-                                "portfolio_v5_full",
+                            "portfolio_v5_full",
+                            "portfolio_v6",
                             }
                             else {}
                         ),
@@ -112,6 +117,14 @@ def run_scheduler(
                 result.valid_candidates = line.split("=", 1)[1].strip()
             elif line.startswith("portfolio_candidate_metrics="):
                 result.candidate_metrics = line.split("=", 1)[1].strip()
+            elif line.startswith("portfolio_profile="):
+                result.profile = line.split("=", 1)[1].strip()
+            elif line.startswith("portfolio_cheap_count="):
+                result.cheap_candidate_count = int(line.split("=", 1)[1])
+            elif line.startswith("portfolio_repair_count="):
+                result.repair_candidate_count = int(line.split("=", 1)[1])
+            elif line.startswith("portfolio_guard_triggered="):
+                result.guard_triggered = line.split("=", 1)[1].strip() == "1"
             elif line.strip():
                 remaining_stderr.append(line.strip())
         if remaining_stderr:
@@ -224,6 +237,10 @@ def write_metadata(path: Path, result: RunResult) -> None:
         "selected_selector": result.selected_selector,
         "valid_candidates": result.valid_candidates,
         "candidate_metrics": result.candidate_metrics,
+        "profile": result.profile,
+        "cheap_candidate_count": result.cheap_candidate_count,
+        "repair_candidate_count": result.repair_candidate_count,
+        "guard_triggered": result.guard_triggered,
         "error": result.error,
     }
     text = "".join(f"{key}={value}\n" for key, value in fields.items())
@@ -252,6 +269,10 @@ def export_csv(path: Path, results: list[RunResult]) -> None:
                 "selected_selector",
                 "valid_candidates",
                 "candidate_metrics",
+                "profile",
+                "cheap_candidate_count",
+                "repair_candidate_count",
+                "guard_triggered",
                 "error",
             ]
         )
@@ -282,6 +303,10 @@ def export_csv(path: Path, results: list[RunResult]) -> None:
                     result.selected_selector,
                     result.valid_candidates,
                     result.candidate_metrics,
+                    result.profile,
+                    result.cheap_candidate_count,
+                    result.repair_candidate_count,
+                    int(result.guard_triggered),
                     result.error,
                 ]
             )

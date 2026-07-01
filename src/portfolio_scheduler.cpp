@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include <future>
 #include <limits>
+#include <numeric>
+#include <random>
 #include <stdexcept>
 #include <utility>
 
@@ -36,7 +38,7 @@ constexpr std::array<const char*, 14> kPortfolioConfigs = {
 
 constexpr const char* kDefaultSelector = "memory_safe";
 
-constexpr std::array<const char*, 8> kSelectorNames = {
+constexpr std::array<const char*, 9> kSelectorNames = {
     "equal_sum",
     "rank_sum",
     "wait_safe",
@@ -45,6 +47,7 @@ constexpr std::array<const char*, 8> kSelectorNames = {
     "no_regret_guard",
     "aggressive_guarded",
     "hard_no_regret",
+    "leaderboard_proxy",
 };
 
 double normalize(double value, double minimum, double maximum) {
@@ -334,6 +337,32 @@ std::size_t PortfolioScheduler::select_best(
                 : candidate.norm_wait +
                     1.3 * candidate.norm_memory +
                     candidate.norm_finish;
+        } else if (selector_name_ == "leaderboard_proxy") {
+            const double denominator = static_cast<double>(
+                std::max<std::size_t>(1, candidates.size() - 1)
+            );
+            double rank_score = 0.0;
+            for (const Candidate& other : candidates) {
+                rank_score += other.e_wait < candidate.e_wait ? 1.0 : 0.0;
+                rank_score += other.e_memory_new < candidate.e_memory_new
+                    ? 1.0 : 0.0;
+                rank_score += other.e_finish < candidate.e_finish ? 1.0 : 0.0;
+            }
+            rank_score /= denominator;
+            double penalty = 0.0;
+            if (guarded_baseline != nullptr) {
+                penalty += candidate.e_wait > guarded_baseline->e_wait * 1.010
+                    ? 0.35 : 0.0;
+                penalty += candidate.e_finish > guarded_baseline->e_finish * 1.006
+                    ? 0.25 : 0.0;
+                penalty += candidate.e_memory_new >
+                    guarded_baseline->e_memory_new * 1.003 ? 0.20 : 0.0;
+            }
+            candidate.primary_score =
+                0.45 * (candidate.norm_wait +
+                        1.25 * candidate.norm_memory +
+                        candidate.norm_finish) +
+                0.55 * rank_score + penalty;
         } else if (selector_name_ == "aggressive_guarded") {
             double penalty = 0.0;
             if (guarded_baseline != nullptr) {
@@ -783,6 +812,255 @@ std::vector<Assignment> PortfolioScheduler::solve_v5(bool full_pool) {
     }
 }
 
+std::string PortfolioScheduler::classify_case() const {
+    if (instance_.tasks.empty() || instance_.servers.empty()) return "balanced";
+    const long long density = static_cast<long long>(instance_.servers.size()) *
+        static_cast<long long>(instance_.tasks.size());
+    if (instance_.tasks.size() >= 4000 || density >= 250000) {
+        return "large_dense";
+    }
+    auto mean_cv = [](const std::vector<double>& values) {
+        const double mean = std::accumulate(values.begin(), values.end(), 0.0) /
+            static_cast<double>(values.size());
+        double variance = 0.0;
+        for (double value : values) variance += (value - mean) * (value - mean);
+        variance /= static_cast<double>(values.size());
+        return std::pair<double, double>{
+            mean,
+            mean <= 0.0 ? 0.0 : std::sqrt(variance) / mean,
+        };
+    };
+    std::vector<double> gpu_memory, durations, weights, task_memory, releases;
+    double feasible_total = 0.0;
+    int high_memory = 0;
+    int large_gpu = 0;
+    for (const Server& server : instance_.servers) gpu_memory.push_back(server.gpu_memory);
+    for (const Task& task : instance_.tasks) {
+        durations.push_back(static_cast<double>(task.duration));
+        weights.push_back(static_cast<double>(task.weight));
+        task_memory.push_back(static_cast<double>(task.total_gpu_memory));
+        releases.push_back(static_cast<double>(task.release_time));
+        large_gpu += task.min_gpu >= 4 ? 1 : 0;
+        for (const Server& server : instance_.servers) {
+            const int gpu = std::max(
+                task.min_gpu,
+                (task.total_gpu_memory + server.gpu_memory - 1) /
+                    server.gpu_memory
+            );
+            if (gpu <= server.gpu_count && task.cpu_cores <= server.cpu_cores &&
+                task.memory <= server.memory) {
+                feasible_total += 1.0;
+                if (task.total_gpu_memory >= server.gpu_memory * 2) high_memory++;
+            }
+        }
+    }
+    const auto [gpu_memory_mean, gpu_memory_cv] = mean_cv(gpu_memory);
+    const auto [duration_mean, duration_cv] = mean_cv(durations);
+    const auto [weight_mean, weight_cv] = mean_cv(weights);
+    const auto [memory_mean, memory_cv] = mean_cv(task_memory);
+    const auto [release_mean, release_cv] = mean_cv(releases);
+    (void)gpu_memory_mean; (void)duration_mean; (void)weight_mean;
+    (void)memory_mean; (void)release_mean;
+    const double average_fit = feasible_total / instance_.tasks.size();
+    const double scarcity = average_fit <= 0.0 ? 1.0 : 1.0 / average_fit;
+    const double high_memory_ratio = static_cast<double>(high_memory) /
+        std::max(1.0, feasible_total);
+    const double large_ratio = static_cast<double>(large_gpu) /
+        instance_.tasks.size();
+    if (gpu_memory_cv > 0.35 && (average_fit < 4.0 || scarcity > 0.25)) {
+        return "heterogeneous_tight";
+    }
+    if (high_memory_ratio > 0.35 || memory_cv > 1.0) return "memory_dominated";
+    if (weight_cv > 0.9 && release_cv > 0.8) return "wait_dominated";
+    if (duration_cv > 1.0) return "finish_dominated";
+    if (large_ratio > 0.30) return "heterogeneous_tight";
+    return "balanced";
+}
+
+SchedulerConfig PortfolioScheduler::random_config(
+    std::uint64_t& state,
+    const std::string& profile,
+    int index
+) const {
+    auto next = [&state]() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        return state;
+    };
+    auto pick = [&next](const auto& values) {
+        return values[next() % values.size()];
+    };
+    static const std::array<double, 5> priority{1, 2, 3, 4, 6};
+    static const std::array<double, 7> wait{.005, .01, .018, .025, .035, .05, .08};
+    static const std::array<double, 5> scarcity{10, 25, 50, 80, 120};
+    static const std::array<double, 7> area{.02, .05, .08, .15, .35, .65, .95};
+    static const std::array<double, 6> short_job{0, 2, 6, 10, 16, 24};
+    static const std::array<double, 5> gpu_fragment{1, 2, 3, 5, 8};
+    static const std::array<double, 5> gpu_memory_fragment{1, 2, 4, 8, 12};
+    static const std::array<double, 4> ordinary_fragment{.25, .5, 1, 2};
+    static const std::array<double, 5> imbalance{0, .5, 1, 2, 4};
+    static const std::array<double, 6> memory_waste{4, 8, 12, 16, 24, 32};
+    static const std::array<double, 5> duration_scale{.05, .10, .20, .35, .50};
+    static const std::array<int, 4> large_threshold{2, 3, 4, 5};
+    static const std::array<int, 3> capacity_threshold{4, 6, 8};
+    static const std::array<double, 6> reserve{0, 1, 3, 5, 8, 12};
+    static const std::array<double, 5> mismatch{0, 1, 3, 5, 8};
+    static const std::array<double, 4> affinity{0, .5, 1, 2};
+
+    SchedulerConfig config = scheduler_config_from_name("v1d_strong");
+    config.name = "v6_seed_" + std::to_string(index);
+    config.task_score.w_priority = pick(priority);
+    config.task_score.w_wait = pick(wait);
+    config.task_score.w_scarcity = pick(scarcity);
+    config.task_score.w_area = pick(area);
+    config.task_score.w_short_job = pick(short_job);
+    config.server_score.w_gpu_fragment = pick(gpu_fragment);
+    config.server_score.w_gpu_memory_fragment = pick(gpu_memory_fragment);
+    config.server_score.w_cpu_fragment = pick(ordinary_fragment);
+    config.server_score.w_memory_fragment = pick(ordinary_fragment);
+    config.server_score.w_residual_imbalance = pick(imbalance);
+    config.memory_aware_score.enabled = true;
+    config.memory_aware_score.w_duration_memory_waste = pick(memory_waste);
+    config.memory_aware_score.duration_log_scale = pick(duration_scale);
+    config.isolation_score.enabled = true;
+    config.isolation_score.large_task_gpu_threshold = pick(large_threshold);
+    config.isolation_score.high_capacity_gpu_threshold = pick(capacity_threshold);
+    config.isolation_score.w_high_capacity_reserve = pick(reserve);
+    config.isolation_score.w_class_mismatch = pick(mismatch);
+    config.isolation_score.w_same_class_affinity = pick(affinity);
+    if (profile == "memory_dominated") {
+        config.server_score.w_gpu_memory_fragment = std::max(8.0, config.server_score.w_gpu_memory_fragment);
+        config.memory_aware_score.w_duration_memory_waste = std::max(24.0, config.memory_aware_score.w_duration_memory_waste);
+    } else if (profile == "wait_dominated") {
+        config.task_score.w_wait = std::max(.035, config.task_score.w_wait);
+        config.task_score.w_scarcity = std::max(80.0, config.task_score.w_scarcity);
+    } else if (profile == "finish_dominated") {
+        config.task_score.w_short_job = std::max(16.0, config.task_score.w_short_job);
+        config.task_score.w_area = std::min(.15, config.task_score.w_area);
+    } else if (profile == "heterogeneous_tight") {
+        config.isolation_score.w_high_capacity_reserve = std::max(8.0, config.isolation_score.w_high_capacity_reserve);
+        config.isolation_score.w_class_mismatch = std::max(5.0, config.isolation_score.w_class_mismatch);
+    }
+    return config;
+}
+
+std::vector<Assignment> PortfolioScheduler::solve_v6() {
+    const auto started = std::chrono::steady_clock::now();
+    std::vector<Assignment> baseline = solve_v5(false);
+    try {
+        const char* requested = std::getenv("SCHEDULER_PORTFOLIO_SELECTOR");
+        if (requested == nullptr || *requested == '\0') selector_name_ = "leaderboard_proxy";
+        case_profile_ = classify_case();
+        cheap_candidate_count_ = 0;
+        repair_candidate_count_ = 0;
+        guard_triggered_ = false;
+        Candidate baseline_candidate = evaluate_schedule("v5_baseline", baseline);
+        std::vector<Candidate> candidates{baseline_candidate};
+
+        std::uint64_t state = 1469598103934665603ULL;
+        auto hash_value = [&state](std::uint64_t value) {
+            state ^= value;
+            state *= 1099511628211ULL;
+        };
+        for (const Server& server : instance_.servers) {
+            hash_value(server.id); hash_value(server.gpu_count);
+            hash_value(server.gpu_memory); hash_value(server.cpu_cores);
+            hash_value(server.memory);
+        }
+        for (const Task& task : instance_.tasks) {
+            hash_value(task.id); hash_value(task.release_time);
+            hash_value(task.duration); hash_value(task.min_gpu);
+            hash_value(task.total_gpu_memory); hash_value(task.weight);
+        }
+        for (char value : case_profile_) hash_value(static_cast<unsigned char>(value));
+
+        auto elapsed = [&started]() {
+            return std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - started
+            ).count();
+        };
+        const int cheap_limit = case_profile_ == "large_dense" ? 24 : 80;
+        for (int index = 0; index < cheap_limit; ++index) {
+            if (elapsed() >= 42.0) { guard_triggered_ = true; break; }
+            try {
+                SchedulerConfig config = random_config(state, case_profile_, index);
+                candidates.push_back(run_candidate(config.name, std::move(config), {}));
+                ++cheap_candidate_count_;
+            } catch (const std::exception&) {
+                // Failed random candidates never affect the V5 incumbent.
+            }
+        }
+
+        if (cheap_candidate_count_ == 0) {
+            valid_candidates_ = "v5_baseline";
+            candidate_metrics_ = "v5_baseline:" +
+                std::to_string(baseline_candidate.e_wait) + ":" +
+                std::to_string(baseline_candidate.e_memory_new) + ":" +
+                std::to_string(baseline_candidate.e_finish);
+            selected_config_ = "v5_baseline";
+            return baseline;
+        }
+
+        select_best(candidates, &baseline_candidate);
+        std::vector<std::size_t> order(candidates.size());
+        std::iota(order.begin(), order.end(), 0);
+        std::sort(order.begin(), order.end(), [&candidates](std::size_t left, std::size_t right) {
+            return candidates[left].primary_score < candidates[right].primary_score;
+        });
+        const std::size_t repair_count = std::min<std::size_t>(5, order.size());
+        for (std::size_t rank = 0; rank < repair_count; ++rank) {
+            if (elapsed() >= 54.0) { guard_triggered_ = true; break; }
+            const Candidate& source = candidates[order[rank]];
+            RepairBoosts boosts = analyze_repairs(source.schedule, 5.0, 1.4);
+            SchedulerConfig config;
+            std::unordered_map<int, double> task_boosts;
+            std::string name;
+            if (rank == 0 || rank == 1) {
+                const bool memory = rank == 0;
+                name = memory ? "top1_memory_repair" : "top1_combo_repair";
+                config = scheduler_config_from_name(memory ? "memory_first" : "wait_memory_balance");
+                task_boosts = memory ? boosts.memory_top : boosts.combo_top;
+            } else if (rank == 2 || rank == 3) {
+                const bool memory = rank == 2;
+                name = memory ? "top2_memory_repair" : "top2_combo_repair";
+                config = scheduler_config_from_name(memory ? "memory_first" : "wait_memory_balance");
+                task_boosts = memory ? boosts.memory_top : boosts.combo_top;
+            } else {
+                name = "top3_wait_memory_repair";
+                config = scheduler_config_from_name("wait_memory_balance");
+                task_boosts = boosts.memory_top;
+                for (const auto& [task_id, value] : boosts.wait_top) task_boosts[task_id] += value;
+            }
+            config.name = name;
+            try {
+                candidates.push_back(run_candidate(name, std::move(config), std::move(task_boosts)));
+                ++repair_candidate_count_;
+            } catch (const std::exception&) {
+                // Invalid repairs are discarded.
+            }
+        }
+
+        valid_candidates_.clear();
+        candidate_metrics_.clear();
+        for (const Candidate& candidate : candidates) {
+            if (!valid_candidates_.empty()) valid_candidates_ += ',';
+            valid_candidates_ += candidate.config_name;
+            if (!candidate_metrics_.empty()) candidate_metrics_ += ';';
+            candidate_metrics_ += candidate.config_name + ":" +
+                std::to_string(candidate.e_wait) + ":" +
+                std::to_string(candidate.e_memory_new) + ":" +
+                std::to_string(candidate.e_finish);
+        }
+        const std::size_t best = select_best(candidates, &baseline_candidate);
+        selected_config_ = candidates[best].config_name;
+        return std::move(candidates[best].schedule);
+    } catch (const std::exception&) {
+        selected_config_ = "v5_baseline";
+        return baseline;
+    }
+}
+
 const std::string& PortfolioScheduler::selected_config() const {
     return selected_config_;
 }
@@ -797,4 +1075,20 @@ const std::string& PortfolioScheduler::valid_candidates() const {
 
 const std::string& PortfolioScheduler::candidate_metrics() const {
     return candidate_metrics_;
+}
+
+const std::string& PortfolioScheduler::case_profile() const {
+    return case_profile_;
+}
+
+int PortfolioScheduler::cheap_candidate_count() const {
+    return cheap_candidate_count_;
+}
+
+int PortfolioScheduler::repair_candidate_count() const {
+    return repair_candidate_count_;
+}
+
+bool PortfolioScheduler::guard_triggered() const {
+    return guard_triggered_;
 }

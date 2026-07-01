@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -15,10 +16,15 @@ public:
     std::vector<Assignment> solve_with_repairs();
     std::vector<Assignment> solve_v4();
     std::vector<Assignment> solve_v5(bool full_pool = false);
+    std::vector<Assignment> solve_v6();
     const std::string& selected_config() const;
     const std::string& selector_name() const;
     const std::string& valid_candidates() const;
     const std::string& candidate_metrics() const;
+    const std::string& case_profile() const;
+    int cheap_candidate_count() const;
+    int repair_candidate_count() const;
+    bool guard_triggered() const;
 
 private:
     struct Candidate {
@@ -78,6 +84,12 @@ private:
         const CandidateSpec& spec,
         const std::vector<Assignment>& baseline
     ) const;
+    std::string classify_case() const;
+    SchedulerConfig random_config(
+        std::uint64_t& state,
+        const std::string& profile,
+        int index
+    ) const;
     std::vector<Assignment> fallback_to_v1c();
 
     const Instance& instance_;
@@ -85,4 +97,8 @@ private:
     std::string selector_name_;
     std::string valid_candidates_;
     std::string candidate_metrics_;
+    std::string case_profile_ = "balanced";
+    int cheap_candidate_count_ = 0;
+    int repair_candidate_count_ = 0;
+    bool guard_triggered_ = false;
 };
