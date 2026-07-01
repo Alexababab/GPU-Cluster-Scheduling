@@ -21,14 +21,21 @@ int main() {
             config_name == "portfolio_v2_2" ||
             config_name == "portfolio_v3" ||
             config_name == "portfolio_v3_full" ||
-            config_name == "portfolio_v4") {
+            config_name == "portfolio_v4" ||
+            config_name == "portfolio_v5" ||
+            config_name == "portfolio_v5_full") {
             PortfolioScheduler scheduler(instance);
             std::vector<Assignment> schedule;
             if (config_name == "portfolio_v2_2") {
                 schedule = scheduler.solve();
-            } else if (config_name == "portfolio" ||
-                       config_name == "portfolio_v4") {
+            } else if (config_name == "portfolio_v4") {
                 schedule = scheduler.solve_v4();
+            } else if (config_name == "portfolio" ||
+                       config_name == "portfolio_v5" ||
+                       config_name == "portfolio_v5_full") {
+                schedule = scheduler.solve_v5(
+                    config_name == "portfolio_v5_full"
+                );
             } else {
                 schedule = scheduler.solve_with_repairs();
             }
@@ -42,6 +49,8 @@ int main() {
                           << scheduler.selector_name() << '\n';
                 std::cerr << "portfolio_candidates="
                           << scheduler.valid_candidates() << '\n';
+                std::cerr << "portfolio_candidate_metrics="
+                          << scheduler.candidate_metrics() << '\n';
             }
             write_schedule(std::cout, schedule);
             return 0;

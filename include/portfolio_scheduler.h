@@ -14,9 +14,11 @@ public:
     std::vector<Assignment> solve();
     std::vector<Assignment> solve_with_repairs();
     std::vector<Assignment> solve_v4();
+    std::vector<Assignment> solve_v5(bool full_pool = false);
     const std::string& selected_config() const;
     const std::string& selector_name() const;
     const std::string& valid_candidates() const;
+    const std::string& candidate_metrics() const;
 
 private:
     struct Candidate {
@@ -39,6 +41,19 @@ private:
         std::unordered_map<int, double> combo_top;
     };
 
+    struct CandidateSpec {
+        std::string candidate_name;
+        std::string base_config;
+        std::string repair_type;
+        double bad_task_percent = 5.0;
+        double boost_strength = 1.0;
+        double memory_weight_scale = 1.0;
+        double wait_weight_scale = 1.0;
+        double finish_weight_scale = 1.0;
+        int round_count = 2;
+        bool enabled_by_default = false;
+    };
+
     Candidate run_candidate(const std::string& config_name) const;
     Candidate run_candidate(
         const std::string& candidate_name,
@@ -50,8 +65,17 @@ private:
         const std::string& candidate_name,
         std::vector<Assignment> schedule
     ) const;
-    std::size_t select_best(std::vector<Candidate>& candidates) const;
+    std::size_t select_best(
+        std::vector<Candidate>& candidates,
+        const Candidate* guarded_baseline = nullptr
+    ) const;
     RepairBoosts analyze_repairs(
+        const std::vector<Assignment>& baseline,
+        double bad_task_percent = 5.0,
+        double boost_strength = 1.0
+    ) const;
+    Candidate run_mined_candidate(
+        const CandidateSpec& spec,
         const std::vector<Assignment>& baseline
     ) const;
     std::vector<Assignment> fallback_to_v1c();
@@ -60,4 +84,5 @@ private:
     std::string selected_config_ = "v1c";
     std::string selector_name_;
     std::string valid_candidates_;
+    std::string candidate_metrics_;
 };

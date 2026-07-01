@@ -31,6 +31,7 @@ class RunResult:
     selected_config: str = ""
     selected_selector: str = ""
     valid_candidates: str = ""
+    candidate_metrics: str = ""
     error: str = ""
 
     @property
@@ -87,6 +88,8 @@ def run_scheduler(
                                 "portfolio_v3",
                                 "portfolio_v3_full",
                                 "portfolio_v4",
+                                "portfolio_v5",
+                                "portfolio_v5_full",
                             }
                             else {}
                         ),
@@ -107,6 +110,8 @@ def run_scheduler(
                 result.selected_selector = line.split("=", 1)[1].strip()
             elif line.startswith("portfolio_candidates="):
                 result.valid_candidates = line.split("=", 1)[1].strip()
+            elif line.startswith("portfolio_candidate_metrics="):
+                result.candidate_metrics = line.split("=", 1)[1].strip()
             elif line.strip():
                 remaining_stderr.append(line.strip())
         if remaining_stderr:
@@ -218,6 +223,7 @@ def write_metadata(path: Path, result: RunResult) -> None:
         "selected_config": result.selected_config,
         "selected_selector": result.selected_selector,
         "valid_candidates": result.valid_candidates,
+        "candidate_metrics": result.candidate_metrics,
         "error": result.error,
     }
     text = "".join(f"{key}={value}\n" for key, value in fields.items())
@@ -245,6 +251,7 @@ def export_csv(path: Path, results: list[RunResult]) -> None:
                 "selected_config",
                 "selected_selector",
                 "valid_candidates",
+                "candidate_metrics",
                 "error",
             ]
         )
@@ -274,6 +281,7 @@ def export_csv(path: Path, results: list[RunResult]) -> None:
                     result.selected_config,
                     result.selected_selector,
                     result.valid_candidates,
+                    result.candidate_metrics,
                     result.error,
                 ]
             )

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <future>
@@ -35,13 +36,15 @@ constexpr std::array<const char*, 14> kPortfolioConfigs = {
 
 constexpr const char* kDefaultSelector = "memory_safe";
 
-constexpr std::array<const char*, 6> kSelectorNames = {
+constexpr std::array<const char*, 8> kSelectorNames = {
     "equal_sum",
     "rank_sum",
     "wait_safe",
     "memory_safe",
     "finish_safe",
     "no_regret_guard",
+    "aggressive_guarded",
+    "hard_no_regret",
 };
 
 double normalize(double value, double minimum, double maximum) {
@@ -119,7 +122,9 @@ PortfolioScheduler::Candidate PortfolioScheduler::evaluate_schedule(
 }
 
 PortfolioScheduler::RepairBoosts PortfolioScheduler::analyze_repairs(
-    const std::vector<Assignment>& baseline
+    const std::vector<Assignment>& baseline,
+    double bad_task_percent,
+    double boost_strength
 ) const {
     struct TaskBadness {
         int task_id = 0;
@@ -205,7 +210,12 @@ PortfolioScheduler::RepairBoosts PortfolioScheduler::analyze_repairs(
             );
     }
 
-    auto make_boosts = [&badness, &bounds](
+    auto make_boosts = [
+        &badness,
+        &bounds,
+        bad_task_percent,
+        boost_strength
+    ](
         auto accessor,
         double alpha
     ) {
@@ -223,10 +233,12 @@ PortfolioScheduler::RepairBoosts PortfolioScheduler::analyze_repairs(
             }
         );
         const auto metric_bounds = bounds(accessor);
-        const std::size_t count = std::max<std::size_t>(
-            1,
-            (ordered.size() + 19) / 20
-        );
+        const std::size_t count = std::max<std::size_t>(1, std::min(
+            ordered.size(),
+            static_cast<std::size_t>(std::ceil(
+                ordered.size() * bad_task_percent / 100.0
+            ))
+        ));
         std::unordered_map<int, double> result;
         for (std::size_t index = 0;
              index < std::min(count, ordered.size());
@@ -237,7 +249,7 @@ PortfolioScheduler::RepairBoosts PortfolioScheduler::analyze_repairs(
                 metric_bounds.second
             );
             result[ordered[index].task_id] =
-                alpha * (0.25 + 0.75 * severity);
+                alpha * boost_strength * (0.25 + 0.75 * severity);
         }
         return result;
     };
@@ -262,7 +274,8 @@ PortfolioScheduler::RepairBoosts PortfolioScheduler::analyze_repairs(
 }
 
 std::size_t PortfolioScheduler::select_best(
-    std::vector<Candidate>& candidates
+    std::vector<Candidate>& candidates,
+    const Candidate* guarded_baseline
 ) const {
     if (candidates.empty()) {
         throw std::runtime_error("portfolio has no valid candidates");
@@ -310,7 +323,37 @@ std::size_t PortfolioScheduler::select_best(
             candidate.norm_finish;
         candidate.secondary_score = equal_sum;
 
-        if (selector_name_ == "rank_sum") {
+        if (selector_name_ == "hard_no_regret") {
+            const bool regresses = guarded_baseline != nullptr && (
+                candidate.e_wait > guarded_baseline->e_wait ||
+                candidate.e_memory_new > guarded_baseline->e_memory_new ||
+                candidate.e_finish > guarded_baseline->e_finish
+            );
+            candidate.primary_score = regresses
+                ? std::numeric_limits<double>::infinity()
+                : candidate.norm_wait +
+                    1.3 * candidate.norm_memory +
+                    candidate.norm_finish;
+        } else if (selector_name_ == "aggressive_guarded") {
+            double penalty = 0.0;
+            if (guarded_baseline != nullptr) {
+                if (candidate.e_wait > guarded_baseline->e_wait * 1.010) {
+                    penalty += 0.35;
+                }
+                if (candidate.e_finish >
+                    guarded_baseline->e_finish * 1.005) {
+                    penalty += 0.25;
+                }
+                if (candidate.e_memory_new >
+                    guarded_baseline->e_memory_new * 1.003) {
+                    penalty += 0.20;
+                }
+            }
+            candidate.primary_score =
+                candidate.norm_wait +
+                1.25 * candidate.norm_memory +
+                candidate.norm_finish + penalty;
+        } else if (selector_name_ == "rank_sum") {
             double rank_sum = 0.0;
             for (const Candidate& other : candidates) {
                 rank_sum += other.e_wait < candidate.e_wait ? 1.0 : 0.0;
@@ -383,9 +426,15 @@ std::vector<Assignment> PortfolioScheduler::solve() {
             return fallback_to_v1c();
         }
         valid_candidates_.clear();
+        candidate_metrics_.clear();
         for (const Candidate& candidate : candidates) {
             if (!valid_candidates_.empty()) valid_candidates_ += ',';
             valid_candidates_ += candidate.config_name;
+            if (!candidate_metrics_.empty()) candidate_metrics_ += ';';
+            candidate_metrics_ += candidate.config_name + ":" +
+                std::to_string(candidate.e_wait) + ":" +
+                std::to_string(candidate.e_memory_new) + ":" +
+                std::to_string(candidate.e_finish);
         }
         const std::size_t best = select_best(candidates);
         selected_config_ = candidates[best].config_name;
@@ -466,9 +515,15 @@ std::vector<Assignment> PortfolioScheduler::solve_with_repairs() {
         );
 
         valid_candidates_.clear();
+        candidate_metrics_.clear();
         for (const Candidate& candidate : candidates) {
             if (!valid_candidates_.empty()) valid_candidates_ += ',';
             valid_candidates_ += candidate.config_name;
+            if (!candidate_metrics_.empty()) candidate_metrics_ += ';';
+            candidate_metrics_ += candidate.config_name + ":" +
+                std::to_string(candidate.e_wait) + ":" +
+                std::to_string(candidate.e_memory_new) + ":" +
+                std::to_string(candidate.e_finish);
         }
         const std::size_t best = select_best(candidates);
         selected_config_ = candidates[best].config_name;
@@ -575,15 +630,155 @@ std::vector<Assignment> PortfolioScheduler::solve_v4() {
         }
 
         valid_candidates_.clear();
+        candidate_metrics_.clear();
         for (const Candidate& candidate : candidates) {
             if (!valid_candidates_.empty()) valid_candidates_ += ',';
             valid_candidates_ += candidate.config_name;
+            if (!candidate_metrics_.empty()) candidate_metrics_ += ';';
+            candidate_metrics_ += candidate.config_name + ":" +
+                std::to_string(candidate.e_wait) + ":" +
+                std::to_string(candidate.e_memory_new) + ":" +
+                std::to_string(candidate.e_finish);
         }
         const std::size_t best = select_best(candidates);
         selected_config_ = candidates[best].config_name;
         return std::move(candidates[best].schedule);
     } catch (const std::exception&) {
         selected_config_ = "v3_baseline";
+        return baseline;
+    }
+}
+
+PortfolioScheduler::Candidate PortfolioScheduler::run_mined_candidate(
+    const CandidateSpec& spec,
+    const std::vector<Assignment>& baseline
+) const {
+    auto boosts_for = [&spec](RepairBoosts boosts) {
+        if (spec.repair_type == "memory") return boosts.memory_top;
+        if (spec.repair_type == "combo") return boosts.combo_top;
+        if (spec.repair_type == "finish") return boosts.finish_tail;
+        std::unordered_map<int, double> combined = boosts.memory_top;
+        for (const auto& [task_id, value] : boosts.wait_top) {
+            combined[task_id] += value;
+        }
+        return combined;
+    };
+
+    auto make_config = [&spec]() {
+        SchedulerConfig config =
+            scheduler_config_from_name(spec.base_config);
+        config.name = spec.candidate_name;
+        config.task_score.w_wait *= spec.wait_weight_scale;
+        config.task_score.w_short_job *= spec.finish_weight_scale;
+        config.server_score.w_gpu_memory_fragment *=
+            spec.memory_weight_scale;
+        config.memory_aware_score.w_duration_memory_waste *=
+            spec.memory_weight_scale;
+        return config;
+    };
+
+    RepairBoosts boosts = analyze_repairs(
+        baseline,
+        spec.bad_task_percent,
+        spec.boost_strength
+    );
+    Candidate candidate = run_candidate(
+        spec.candidate_name,
+        make_config(),
+        boosts_for(std::move(boosts))
+    );
+    if (spec.round_count >= 3) {
+        RepairBoosts round_three = analyze_repairs(
+            candidate.schedule,
+            spec.bad_task_percent,
+            spec.boost_strength
+        );
+        candidate = run_candidate(
+            spec.candidate_name,
+            make_config(),
+            boosts_for(std::move(round_three))
+        );
+    }
+    if (spec.repair_type == "finish") {
+        const Candidate guard = evaluate_schedule("guard", baseline);
+        if (candidate.e_wait > guard.e_wait * 1.010) {
+            throw std::runtime_error("finish repair exceeded wait guard");
+        }
+    }
+    return candidate;
+}
+
+std::vector<Assignment> PortfolioScheduler::solve_v5(bool full_pool) {
+    const auto started_at = std::chrono::steady_clock::now();
+    std::vector<Assignment> baseline = solve_v4();
+    try {
+        const char* requested = std::getenv("SCHEDULER_PORTFOLIO_SELECTOR");
+        if (requested == nullptr || *requested == '\0') {
+            selector_name_ = "hard_no_regret";
+        }
+        Candidate baseline_candidate = evaluate_schedule(
+            "v4_baseline",
+            baseline
+        );
+        std::vector<Candidate> candidates;
+        candidates.push_back(baseline_candidate);
+
+        const std::array<CandidateSpec, 12> specs = {{
+            {"memory_r2_p3_b12", "memory_first", "memory", 3, 1.2, 1.10, 1, 1, 2, true},
+            {"memory_r2_p5_b16", "memory_first", "memory", 5, 1.6, 1.15, 1, 1, 2, false},
+            {"memory_r2_p8_b20", "memory_first", "memory", 8, 2.0, 1.20, 1, 1, 2, false},
+            {"memory_r3_p5_b14", "memory_first", "memory", 5, 1.4, 1.15, 1, 1, 3, true},
+            {"memory_r3_p8_b18", "memory_first", "memory", 8, 1.8, 1.20, 1, 1, 3, true},
+            {"combo_r2_p3_b12", "wait_memory_balance", "combo", 3, 1.2, 1.05, 1.05, 1, 2, true},
+            {"combo_r2_p5_b16", "wait_memory_balance", "combo", 5, 1.6, 1.10, 1.05, 1, 2, false},
+            {"combo_r2_p8_b20", "wait_memory_balance", "combo", 8, 2.0, 1.15, 1.05, 1, 2, true},
+            {"combo_r3_p5_b14", "wait_memory_balance", "combo", 5, 1.4, 1.10, 1.05, 1, 3, true},
+            {"wait_memory_r2_p5_b16", "wait_memory_balance", "wait_memory", 5, 1.6, 1.10, 1.15, 1, 2, false},
+            {"wait_memory_r2_p8_b20", "wait_memory_balance", "wait_memory", 8, 2.0, 1.15, 1.20, 1, 2, true},
+            {"finish_tail_guarded", "finish_balanced", "finish", 5, 1.15, 1, 1, 1.10, 2, false},
+        }};
+
+        std::vector<std::future<Candidate>> pending;
+        for (const CandidateSpec& spec : specs) {
+            if (!full_pool && !spec.enabled_by_default) continue;
+            const double elapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - started_at
+            ).count();
+            if (elapsed > 52.0) break;
+            pending.push_back(std::async(
+                std::launch::async,
+                [this, spec, &baseline]() {
+                    return run_mined_candidate(spec, baseline);
+                }
+            ));
+        }
+        for (std::future<Candidate>& future : pending) {
+            try {
+                candidates.push_back(future.get());
+            } catch (const std::exception&) {
+                // Invalid and failed mined candidates are excluded.
+            }
+        }
+
+        valid_candidates_.clear();
+        candidate_metrics_.clear();
+        for (const Candidate& candidate : candidates) {
+            if (!valid_candidates_.empty()) valid_candidates_ += ',';
+            valid_candidates_ += candidate.config_name;
+            if (!candidate_metrics_.empty()) candidate_metrics_ += ';';
+            candidate_metrics_ += candidate.config_name + ":" +
+                std::to_string(candidate.e_wait) + ":" +
+                std::to_string(candidate.e_memory_new) + ":" +
+                std::to_string(candidate.e_finish);
+        }
+        const std::size_t best = select_best(
+            candidates,
+            &baseline_candidate
+        );
+        selected_config_ = candidates[best].config_name;
+        return std::move(candidates[best].schedule);
+    } catch (const std::exception&) {
+        selected_config_ = "v4_baseline";
         return baseline;
     }
 }
@@ -598,4 +793,8 @@ const std::string& PortfolioScheduler::selector_name() const {
 
 const std::string& PortfolioScheduler::valid_candidates() const {
     return valid_candidates_;
+}
+
+const std::string& PortfolioScheduler::candidate_metrics() const {
+    return candidate_metrics_;
 }
