@@ -9,11 +9,13 @@
 GreedyScheduler::GreedyScheduler(
     const Instance& instance,
     SchedulerConfig config,
-    std::unordered_map<int, double> task_boosts
+    std::unordered_map<int, double> task_boosts,
+    ReservationConfig reservation
 )
     : config_(std::move(config)),
       tasks_(instance.tasks),
-      task_boosts_(std::move(task_boosts)) {
+      task_boosts_(std::move(task_boosts)),
+      reservation_(reservation) {
     std::sort(
         tasks_.begin(),
         tasks_.end(),
@@ -409,6 +411,70 @@ void GreedyScheduler::order_pending_tasks(
     );
 }
 
+std::vector<int> GreedyScheduler::select_anchor_tasks(
+    const std::vector<int>& pending_task_indices,
+    long long current_time
+) const {
+    std::vector<int> anchors = pending_task_indices;
+    const std::size_t anchor_count = std::min(
+        anchors.size(),
+        static_cast<std::size_t>(
+            std::max(1, reservation_.max_anchor_tasks)
+        )
+    );
+    auto better_anchor = [this, current_time](int left, int right) {
+            auto anchor_score = [this, current_time](int index) {
+                const Task& task = tasks_[index];
+                const TaskFeatures& features = task_features_[index];
+                const double wait_cost = static_cast<double>(
+                    std::max(0LL, current_time - task.release_time)
+                ) * task.weight;
+                return 0.06 * wait_cost +
+                       500.0 * features.scarcity +
+                       35.0 * features.min_required_gpu +
+                       0.002 * task.total_gpu_memory +
+                       8.0 * task.weight;
+            };
+            const double left_score = anchor_score(left);
+            const double right_score = anchor_score(right);
+            if (left_score != right_score) return left_score > right_score;
+            return tasks_[left].id < tasks_[right].id;
+        };
+    std::partial_sort(
+        anchors.begin(),
+        anchors.begin() + anchor_count,
+        anchors.end(),
+        better_anchor
+    );
+    anchors.resize(anchor_count);
+    return anchors;
+}
+
+bool GreedyScheduler::blocks_reserved_anchor(
+    int task_index,
+    const StartChoice& choice,
+    const std::vector<int>& anchors,
+    const std::vector<bool>& reserved_servers,
+    long long current_time,
+    long long anchor_window
+) const {
+    if (!reservation_.enabled ||
+        task_features_[task_index].min_required_gpu >
+            reservation_.small_task_gpu_limit ||
+        std::find(anchors.begin(), anchors.end(), task_index) !=
+            anchors.end()) {
+        return false;
+    }
+    if (current_time + tasks_[task_index].duration <= anchor_window) {
+        return false;
+    }
+
+    return choice.server_index >= 0 &&
+           choice.server_index <
+               static_cast<int>(reserved_servers.size()) &&
+           reserved_servers[choice.server_index];
+}
+
 bool GreedyScheduler::start_ready_tasks(
     std::vector<int>& pending_task_indices,
     long long current_time,
@@ -421,6 +487,32 @@ bool GreedyScheduler::start_ready_tasks(
 ) {
     order_pending_tasks(pending_task_indices, current_time);
 
+    const std::vector<int> anchors = reservation_.enabled
+        ? select_anchor_tasks(pending_task_indices, current_time)
+        : std::vector<int>{};
+    std::vector<bool> reserved_servers(servers_.size(), false);
+    for (const int anchor_index : anchors) {
+        const Task& anchor = tasks_[anchor_index];
+        for (const FeasiblePlacement& placement :
+             feasible_placements_[anchor_index]) {
+            const ServerState& state = servers_[placement.server_index];
+            const bool scarce_anchor =
+                task_features_[anchor_index].fit_count <=
+                std::max(3, static_cast<int>(servers_.size() / 3));
+            const bool gpu_pressure =
+                placement.gpu_count * 2 >= state.server().gpu_count;
+            const bool memory_pressure =
+                anchor.total_gpu_memory * 2 >=
+                state.server().gpu_memory * state.server().gpu_count;
+            if (scarce_anchor || gpu_pressure || memory_pressure) {
+                reserved_servers[placement.server_index] = true;
+            }
+        }
+    }
+    const long long anchor_window = finish_events.empty()
+        ? current_time
+        : finish_events.top().task.finish_time;
+
     bool started_any = false;
     std::vector<int> still_pending;
     still_pending.reserve(pending_task_indices.size());
@@ -429,6 +521,17 @@ bool GreedyScheduler::start_ready_tasks(
         const Task& task = tasks_[task_index];
         const StartChoice choice = choose_start(task_index);
         if (choice.server_index == -1) {
+            still_pending.push_back(task_index);
+            continue;
+        }
+        if (blocks_reserved_anchor(
+                task_index,
+                choice,
+                anchors,
+                reserved_servers,
+                current_time,
+                anchor_window
+            )) {
             still_pending.push_back(task_index);
             continue;
         }
@@ -449,6 +552,33 @@ bool GreedyScheduler::start_ready_tasks(
         assignments.push_back(assignment);
         finish_events.push(FinishEvent{running});
         started_any = true;
+    }
+
+    if (!started_any && reservation_.enabled) {
+        for (auto it = still_pending.begin(); it != still_pending.end(); ++it) {
+            const int task_index = *it;
+            const StartChoice choice = choose_start(task_index);
+            if (choice.server_index == -1) continue;
+            const Task& task = tasks_[task_index];
+            auto [assignment, running] =
+                servers_[choice.server_index].start(
+                    task,
+                    current_time,
+                    choice.gpu_count,
+                    is_large_task(
+                        task_index,
+                        FeasiblePlacement{
+                            choice.server_index,
+                            choice.gpu_count,
+                        }
+                    )
+                );
+            assignments.push_back(assignment);
+            finish_events.push(FinishEvent{running});
+            still_pending.erase(it);
+            started_any = true;
+            break;
+        }
     }
 
     pending_task_indices.swap(still_pending);

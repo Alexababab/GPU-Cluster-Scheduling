@@ -13,6 +13,7 @@ public:
 
     std::vector<Assignment> solve();
     std::vector<Assignment> solve_with_repairs();
+    std::vector<Assignment> solve_v4();
     const std::string& selected_config() const;
     const std::string& selector_name() const;
     const std::string& valid_candidates() const;
@@ -42,7 +43,8 @@ private:
     Candidate run_candidate(
         const std::string& candidate_name,
         SchedulerConfig config,
-        std::unordered_map<int, double> task_boosts
+        std::unordered_map<int, double> task_boosts,
+        bool reservation_enabled = false
     ) const;
     Candidate evaluate_schedule(
         const std::string& candidate_name,

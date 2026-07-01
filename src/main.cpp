@@ -19,12 +19,19 @@ int main() {
             config_environment == nullptr ? "v1b" : config_environment;
         if (config_name == "portfolio" ||
             config_name == "portfolio_v2_2" ||
-            config_name == "portfolio_v3") {
+            config_name == "portfolio_v3" ||
+            config_name == "portfolio_v3_full" ||
+            config_name == "portfolio_v4") {
             PortfolioScheduler scheduler(instance);
-            const std::vector<Assignment> schedule =
-                config_name == "portfolio_v2_2"
-                    ? scheduler.solve()
-                    : scheduler.solve_with_repairs();
+            std::vector<Assignment> schedule;
+            if (config_name == "portfolio_v2_2") {
+                schedule = scheduler.solve();
+            } else if (config_name == "portfolio" ||
+                       config_name == "portfolio_v4") {
+                schedule = scheduler.solve_v4();
+            } else {
+                schedule = scheduler.solve_with_repairs();
+            }
             const char* trace_environment =
                 std::getenv("SCHEDULER_TRACE_SELECTION");
             if (trace_environment != nullptr &&

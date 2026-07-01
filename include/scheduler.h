@@ -8,12 +8,19 @@
 #include "scheduler_config.h"
 #include "server_state.h"
 
+struct ReservationConfig {
+    bool enabled = false;
+    int max_anchor_tasks = 3;
+    int small_task_gpu_limit = 2;
+};
+
 class GreedyScheduler {
 public:
     explicit GreedyScheduler(
         const Instance& instance,
         SchedulerConfig config = SchedulerConfig{},
-        std::unordered_map<int, double> task_boosts = {}
+        std::unordered_map<int, double> task_boosts = {},
+        ReservationConfig reservation = {}
     );
 
     std::vector<Assignment> solve();
@@ -96,6 +103,18 @@ private:
         std::vector<int>& pending_task_indices,
         long long current_time
     ) const;
+    std::vector<int> select_anchor_tasks(
+        const std::vector<int>& pending_task_indices,
+        long long current_time
+    ) const;
+    bool blocks_reserved_anchor(
+        int task_index,
+        const StartChoice& choice,
+        const std::vector<int>& anchors,
+        const std::vector<bool>& reserved_servers,
+        long long current_time,
+        long long anchor_window
+    ) const;
 
     SchedulerConfig config_;
     std::vector<Task> tasks_;
@@ -103,4 +122,5 @@ private:
     std::vector<std::vector<FeasiblePlacement>> feasible_placements_;
     std::vector<TaskFeatures> task_features_;
     std::unordered_map<int, double> task_boosts_;
+    ReservationConfig reservation_;
 };

@@ -85,6 +85,8 @@ def run_scheduler(
                                 "portfolio",
                                 "portfolio_v2_2",
                                 "portfolio_v3",
+                                "portfolio_v3_full",
+                                "portfolio_v4",
                             }
                             else {}
                         ),

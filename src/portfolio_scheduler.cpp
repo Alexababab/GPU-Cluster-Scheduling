@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstdlib>
+#include <future>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -83,12 +84,14 @@ PortfolioScheduler::Candidate PortfolioScheduler::run_candidate(
 PortfolioScheduler::Candidate PortfolioScheduler::run_candidate(
     const std::string& candidate_name,
     SchedulerConfig config,
-    std::unordered_map<int, double> task_boosts
+    std::unordered_map<int, double> task_boosts,
+    bool reservation_enabled
 ) const {
     GreedyScheduler scheduler(
         instance_,
         std::move(config),
-        std::move(task_boosts)
+        std::move(task_boosts),
+        ReservationConfig{reservation_enabled, 3, 2}
     );
     return evaluate_schedule(candidate_name, scheduler.solve());
 }
@@ -472,6 +475,115 @@ std::vector<Assignment> PortfolioScheduler::solve_with_repairs() {
         return std::move(candidates[best].schedule);
     } catch (const std::exception&) {
         selected_config_ = "v2.2_baseline";
+        return baseline;
+    }
+}
+
+std::vector<Assignment> PortfolioScheduler::solve_v4() {
+    std::vector<Assignment> baseline = solve_with_repairs();
+    try {
+        std::vector<Candidate> candidates;
+        candidates.reserve(6);
+        candidates.push_back(evaluate_schedule("v3_baseline", baseline));
+        RepairBoosts boosts = analyze_repairs(baseline);
+
+        std::vector<std::future<Candidate>> pending_candidates;
+        pending_candidates.reserve(5);
+        auto add_candidate = [&pending_candidates, this](
+            const std::string& name,
+            SchedulerConfig config,
+            std::unordered_map<int, double> task_boosts,
+            bool reservation
+        ) {
+            pending_candidates.push_back(std::async(
+                std::launch::async,
+                [this,
+                 name,
+                 config = std::move(config),
+                 task_boosts = std::move(task_boosts),
+                 reservation]() mutable {
+                    return run_candidate(
+                        name,
+                        std::move(config),
+                        std::move(task_boosts),
+                        reservation
+                    );
+                }
+            ));
+        };
+
+        SchedulerConfig memory = scheduler_config_from_name("memory_first");
+        memory.name = "repair_memory_round2";
+        memory.server_score.w_gpu_memory_fragment = 5.5;
+        memory.memory_aware_score.w_duration_memory_waste = 30.0;
+        add_candidate(
+            "repair_memory_round2",
+            std::move(memory),
+            boosts.memory_top,
+            false
+        );
+
+        SchedulerConfig combo =
+            scheduler_config_from_name("wait_memory_balance");
+        combo.name = "repair_combo_round2";
+        add_candidate(
+            "repair_combo_round2",
+            combo,
+            boosts.combo_top,
+            false
+        );
+
+        std::unordered_map<int, double> wait_memory = boosts.memory_top;
+        for (const auto& [task_id, value] : boosts.wait_top) {
+            wait_memory[task_id] += 0.75 * value;
+        }
+        SchedulerConfig balanced =
+            scheduler_config_from_name("wait_memory_balance");
+        balanced.name = "repair_wait_memory_round2";
+        balanced.task_score.w_wait *= 1.15;
+        add_candidate(
+            "repair_wait_memory_round2",
+            std::move(balanced),
+            std::move(wait_memory),
+            false
+        );
+
+        SchedulerConfig reservation =
+            scheduler_config_from_name("high_reserve_v1c");
+        reservation.name = "reservation_backfill";
+        add_candidate(
+            "reservation_backfill",
+            reservation,
+            {},
+            true
+        );
+
+        reservation.name = "reservation_repair_combo";
+        add_candidate(
+            "reservation_repair_combo",
+            std::move(reservation),
+            std::move(boosts.combo_top),
+            true
+        );
+
+        for (std::future<Candidate>& pending : pending_candidates) {
+            try {
+                candidates.push_back(pending.get());
+            } catch (const std::exception&) {
+                // V3 remains available when a V4 candidate fails validation.
+            }
+        }
+
+        valid_candidates_.clear();
+        for (const Candidate& candidate : candidates) {
+            if (!valid_candidates_.empty()) valid_candidates_ += ',';
+            valid_candidates_ += candidate.config_name;
+        }
+        const std::size_t best = select_best(candidates);
+        selected_config_ = candidates[best].config_name;
+        return std::move(candidates[best].schedule);
+    } catch (const std::exception&) {
+        selected_config_ = "v3_baseline";
         return baseline;
     }
 }
