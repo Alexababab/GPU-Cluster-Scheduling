@@ -10,6 +10,7 @@
 #include <numeric>
 #include <random>
 #include <stdexcept>
+#include <unordered_set>
 #include <utility>
 
 #include "metrics.h"
@@ -1193,6 +1194,334 @@ std::vector<Assignment> PortfolioScheduler::solve_v6() {
     }
 }
 
+std::vector<Assignment> PortfolioScheduler::local_beam_repair(
+    const std::vector<Assignment>& incumbent,
+    int operator_index,
+    int beam_width,
+    std::chrono::steady_clock::time_point deadline,
+    int& destroy_size
+) const {
+    struct BadTask {
+        Assignment assignment;
+        const Task* task = nullptr;
+        double wait = 0.0;
+        double memory = 0.0;
+        double finish = 0.0;
+        double hardness = 0.0;
+        double score = 0.0;
+    };
+    struct BeamState {
+        std::vector<Assignment> inserted;
+        double score = 0.0;
+    };
+    auto check_deadline = [&deadline]() {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            throw std::runtime_error("local repair deadline exceeded");
+        }
+    };
+
+    std::unordered_map<int, const Task*> tasks;
+    std::unordered_map<int, const Server*> servers;
+    std::unordered_map<int, Assignment> original;
+    for (const Task& task : instance_.tasks) tasks[task.id] = &task;
+    for (const Server& server : instance_.servers) servers[server.id] = &server;
+    for (const Assignment& assignment : incumbent) original[assignment.task_id] = assignment;
+
+    std::vector<BadTask> bad;
+    bad.reserve(incumbent.size());
+    std::unordered_map<int, double> server_fragment;
+    for (const Assignment& assignment : incumbent) {
+        const Task& task = *tasks.at(assignment.task_id);
+        const Server& server = *servers.at(assignment.server_id);
+        int feasible = 0;
+        for (const Server& candidate : instance_.servers) {
+            const int gpu = std::max(
+                task.min_gpu,
+                (task.total_gpu_memory + candidate.gpu_memory - 1) /
+                    candidate.gpu_memory
+            );
+            feasible += gpu <= candidate.gpu_count &&
+                task.cpu_cores <= candidate.cpu_cores &&
+                task.memory <= candidate.memory ? 1 : 0;
+        }
+        const double wait = static_cast<double>(
+            assignment.start_time - task.release_time
+        ) * task.weight;
+        const double memory = static_cast<double>(task.duration) *
+            (assignment.gpu_count * server.gpu_memory - task.total_gpu_memory);
+        server_fragment[assignment.server_id] += memory +
+            assignment.gpu_count * static_cast<double>(task.duration);
+        bad.push_back(BadTask{
+            assignment, &task, wait, memory,
+            static_cast<double>(assignment.finish_time),
+            1.0 / std::max(1, feasible), 0.0,
+        });
+    }
+    int fragmented_server = -1;
+    for (const auto& [server_id, value] : server_fragment) {
+        if (fragmented_server == -1 || value > server_fragment[fragmented_server]) {
+            fragmented_server = server_id;
+        }
+    }
+    for (BadTask& item : bad) {
+        switch (operator_index) {
+            case 0: item.score = item.memory; break;
+            case 1: item.score = item.wait; break;
+            case 2: item.score = item.finish; break;
+            case 3:
+                item.score = item.assignment.server_id == fragmented_server
+                    ? item.memory + item.finish : -1.0;
+                break;
+            case 4:
+                item.score = item.wait + item.task->weight * 1000.0 /
+                    (1.0 + std::abs(item.task->release_time -
+                                    item.assignment.start_time));
+                break;
+            default:
+                item.score = item.wait + item.memory * 0.02 +
+                    item.hardness * 1e7 + item.task->min_gpu * 1e5 +
+                    item.task->total_gpu_memory * 20.0;
+                break;
+        }
+    }
+    std::sort(bad.begin(), bad.end(), [](const BadTask& left, const BadTask& right) {
+        if (left.score != right.score) return left.score > right.score;
+        return left.task->id < right.task->id;
+    });
+    const int limit = instance_.tasks.size() < 500 ? 80 :
+        (instance_.tasks.size() < 2500 ? 50 : 25);
+    destroy_size = std::min<int>(limit, std::max<int>(5, bad.size() / 50));
+    destroy_size = std::min<int>(destroy_size, bad.size());
+    bad.resize(destroy_size);
+    std::unordered_set<int> destroyed;
+    for (const BadTask& item : bad) destroyed.insert(item.task->id);
+
+    std::vector<Assignment> fixed;
+    std::unordered_map<int, std::vector<Assignment>> fixed_by_server;
+    for (const Assignment& assignment : incumbent) {
+        if (!destroyed.count(assignment.task_id)) {
+            fixed.push_back(assignment);
+            fixed_by_server[assignment.server_id].push_back(assignment);
+        }
+    }
+    long long span = 0;
+    for (const Assignment& assignment : incumbent) span = std::max(span, assignment.finish_time);
+    const long long margin = std::max(1LL, span / 20);
+
+    std::unordered_map<int, double> future_value;
+    for (const Task& task : instance_.tasks) {
+        int best_waste = std::numeric_limits<int>::max();
+        std::vector<int> preferred;
+        for (const Server& server : instance_.servers) {
+            const int gpu = std::max(
+                task.min_gpu,
+                (task.total_gpu_memory + server.gpu_memory - 1) /
+                    server.gpu_memory
+            );
+            if (gpu > server.gpu_count || task.cpu_cores > server.cpu_cores ||
+                task.memory > server.memory) continue;
+            const int waste = gpu * server.gpu_memory - task.total_gpu_memory;
+            if (waste < best_waste) {
+                best_waste = waste;
+                preferred.assign(1, server.id);
+            } else if (waste == best_waste) {
+                preferred.push_back(server.id);
+            }
+        }
+        const double value = static_cast<double>(task.weight) * task.duration *
+            task.total_gpu_memory / std::max<std::size_t>(1, preferred.size());
+        for (int server_id : preferred) future_value[server_id] += value;
+    }
+
+    auto can_place = [&](const Task& task, const Server& server, int gpu,
+                         long long start, const std::vector<Assignment>& inserted) {
+        const long long finish = start + task.duration;
+        std::vector<long long> events{start};
+        auto collect = [&](const std::vector<Assignment>& assignments) {
+            for (const Assignment& other : assignments) {
+                if (other.server_id != server.id || other.finish_time <= start ||
+                    other.start_time >= finish) continue;
+                events.push_back(std::max(start, other.start_time));
+                events.push_back(std::min(finish, other.finish_time));
+            }
+        };
+        collect(fixed_by_server[server.id]);
+        collect(inserted);
+        for (long long time : events) {
+            int used_gpu = gpu;
+            int used_cpu = task.cpu_cores;
+            int used_ram = task.memory;
+            auto consume = [&](const std::vector<Assignment>& assignments) {
+                for (const Assignment& other : assignments) {
+                    if (other.server_id == server.id && other.start_time <= time &&
+                        time < other.finish_time) {
+                        const Task& other_task = *tasks.at(other.task_id);
+                        used_gpu += other.gpu_count;
+                        used_cpu += other_task.cpu_cores;
+                        used_ram += other_task.memory;
+                    }
+                }
+            };
+            consume(fixed_by_server[server.id]);
+            consume(inserted);
+            if (used_gpu > server.gpu_count || used_cpu > server.cpu_cores ||
+                used_ram > server.memory) return false;
+        }
+        return true;
+    };
+
+    std::vector<BeamState> beam(1);
+    for (const BadTask& item : bad) {
+        check_deadline();
+        const Task& task = *item.task;
+        std::vector<BeamState> expanded;
+        for (const BeamState& state : beam) {
+            for (const Server& server : instance_.servers) {
+                const int gpu = std::max(
+                    task.min_gpu,
+                    (task.total_gpu_memory + server.gpu_memory - 1) /
+                        server.gpu_memory
+                );
+                if (gpu > server.gpu_count || task.cpu_cores > server.cpu_cores ||
+                    task.memory > server.memory) continue;
+                std::vector<long long> starts{
+                    task.release_time,
+                    item.assignment.start_time,
+                    std::max(task.release_time, item.assignment.start_time - margin),
+                };
+                for (const Assignment& event : fixed_by_server[server.id]) {
+                    if (event.finish_time >= task.release_time &&
+                        event.finish_time <= item.assignment.finish_time + margin) {
+                        starts.push_back(event.finish_time);
+                    }
+                }
+                for (const Assignment& event : state.inserted) {
+                    if (event.server_id == server.id) starts.push_back(event.finish_time);
+                }
+                std::sort(starts.begin(), starts.end());
+                starts.erase(std::unique(starts.begin(), starts.end()), starts.end());
+                if (starts.size() > 16) starts.resize(16);
+                for (long long start : starts) {
+                    if (start < task.release_time || !can_place(
+                            task, server, gpu, start, state.inserted)) continue;
+                    BeamState next = state;
+                    Assignment assignment{
+                        task.id, server.id, start, gpu, start + task.duration,
+                    };
+                    next.inserted.push_back(assignment);
+                    const double new_wait = static_cast<double>(start - task.release_time) *
+                        task.weight;
+                    const double new_memory = static_cast<double>(task.duration) *
+                        (gpu * server.gpu_memory - task.total_gpu_memory);
+                    const int left_gpu = server.gpu_count - gpu;
+                    const double cpu_per_gpu = left_gpu <= 0 ? server.cpu_cores :
+                        static_cast<double>(server.cpu_cores - task.cpu_cores) / left_gpu;
+                    const double ram_per_gpu = left_gpu <= 0 ? server.memory :
+                        static_cast<double>(server.memory - task.memory) / left_gpu;
+                    const double stranded = left_gpu > 0 &&
+                        (cpu_per_gpu < 1.0 || ram_per_gpu < 1024.0)
+                        ? left_gpu * std::log1p(static_cast<double>(task.duration)) : 0.0;
+                    const double future_damage = task.duration *
+                        (static_cast<double>(gpu) / server.gpu_count) *
+                        future_value[server.id] * 1e-10;
+                    next.score +=
+                        (new_wait - item.wait) / (1.0 + std::abs(item.wait)) +
+                        1.25 * (new_memory - item.memory) /
+                            (1.0 + std::abs(item.memory)) +
+                        0.5 * (assignment.finish_time - item.assignment.finish_time) /
+                            (1.0 + item.assignment.finish_time) +
+                        0.02 * stranded + future_damage;
+                    expanded.push_back(std::move(next));
+                    if ((expanded.size() & 127U) == 0) check_deadline();
+                }
+            }
+        }
+        if (expanded.empty()) throw std::runtime_error("beam repair found no insertion");
+        std::sort(expanded.begin(), expanded.end(), [](const BeamState& left, const BeamState& right) {
+            return left.score < right.score;
+        });
+        if (expanded.size() > static_cast<std::size_t>(beam_width)) {
+            expanded.resize(beam_width);
+        }
+        beam = std::move(expanded);
+    }
+    std::vector<Assignment> repaired = fixed;
+    repaired.insert(repaired.end(), beam.front().inserted.begin(), beam.front().inserted.end());
+    std::sort(repaired.begin(), repaired.end(), [](const Assignment& left, const Assignment& right) {
+        return left.task_id < right.task_id;
+    });
+    return repaired;
+}
+
+std::vector<Assignment> PortfolioScheduler::solve_v7() {
+    const auto started = std::chrono::steady_clock::now();
+    const auto deadline = started + std::chrono::seconds(55);
+    std::vector<Assignment> incumbent = solve_v6();
+    Candidate incumbent_metrics = evaluate_schedule("v6_safe", incumbent);
+    int accepted = 0;
+    int rejected = 0;
+    int total_destroy = 0;
+    std::array<int, 6> selected{};
+    std::array<int, 6> successes{};
+    const int beam_width = instance_.tasks.size() >= 2500 ? 4 :
+        (instance_.tasks.size() >= 500 ? 8 : 12);
+    int iteration = 0;
+    while (iteration < 18 && std::chrono::steady_clock::now() < deadline) {
+        const int operator_index = iteration % 6;
+        ++selected[operator_index];
+        int destroy_size = 0;
+        try {
+            std::vector<Assignment> repaired = local_beam_repair(
+                incumbent, operator_index, beam_width, deadline, destroy_size
+            );
+            total_destroy += destroy_size;
+            Candidate candidate = evaluate_schedule(
+                "v7_operator_" + std::to_string(operator_index),
+                std::move(repaired)
+            );
+            const bool guarded =
+                candidate.e_wait <= incumbent_metrics.e_wait * 1.010 &&
+                candidate.e_finish <= incumbent_metrics.e_finish * 1.006 &&
+                candidate.e_memory_new <= incumbent_metrics.e_memory_new * 1.003;
+            const double relative_score =
+                (candidate.e_wait / std::max(1.0, incumbent_metrics.e_wait) - 1.0) +
+                1.25 * (candidate.e_memory_new /
+                    std::max(1.0, incumbent_metrics.e_memory_new) - 1.0) +
+                (static_cast<double>(candidate.e_finish) /
+                    std::max(1.0, static_cast<double>(incumbent_metrics.e_finish)) - 1.0);
+            if (guarded && relative_score < -1e-9) {
+                incumbent = candidate.schedule;
+                incumbent_metrics = std::move(candidate);
+                ++accepted;
+                ++successes[operator_index];
+                selected_config_ = "v7_operator_" + std::to_string(operator_index);
+            } else {
+                ++rejected;
+            }
+        } catch (const std::exception&) {
+            ++rejected;
+            guard_triggered_ = true;
+            guard_triggered_stage_ = "v7_local_repair";
+            break;
+        }
+        ++iteration;
+    }
+    std::string selected_text;
+    std::string success_text;
+    for (int index = 0; index < 6; ++index) {
+        if (index) { selected_text += ','; success_text += ','; }
+        selected_text += std::to_string(selected[index]);
+        success_text += std::to_string(successes[index]);
+    }
+    v7_stats_ = "accepted:" + std::to_string(accepted) +
+        ";rejected:" + std::to_string(rejected) +
+        ";destroy_total:" + std::to_string(total_destroy) +
+        ";beam:" + std::to_string(beam_width) +
+        ";selected:" + selected_text +
+        ";success:" + success_text;
+    return incumbent;
+}
+
 const std::string& PortfolioScheduler::selected_config() const {
     return selected_config_;
 }
@@ -1231,4 +1560,8 @@ int PortfolioScheduler::aborted_candidate_count() const {
 
 const std::string& PortfolioScheduler::guard_triggered_stage() const {
     return guard_triggered_stage_;
+}
+
+const std::string& PortfolioScheduler::v7_stats() const {
+    return v7_stats_;
 }

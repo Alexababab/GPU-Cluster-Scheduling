@@ -18,6 +18,7 @@ public:
     std::vector<Assignment> solve_v4();
     std::vector<Assignment> solve_v5(bool full_pool = false);
     std::vector<Assignment> solve_v6();
+    std::vector<Assignment> solve_v7();
     const std::string& selected_config() const;
     const std::string& selector_name() const;
     const std::string& valid_candidates() const;
@@ -28,6 +29,7 @@ public:
     bool guard_triggered() const;
     int aborted_candidate_count() const;
     const std::string& guard_triggered_stage() const;
+    const std::string& v7_stats() const;
 
 private:
     struct Candidate {
@@ -99,6 +101,13 @@ private:
         const std::string& profile,
         int index
     ) const;
+    std::vector<Assignment> local_beam_repair(
+        const std::vector<Assignment>& incumbent,
+        int operator_index,
+        int beam_width,
+        std::chrono::steady_clock::time_point deadline,
+        int& destroy_size
+    ) const;
     std::vector<Assignment> fallback_to_v1c();
 
     const Instance& instance_;
@@ -112,4 +121,5 @@ private:
     bool guard_triggered_ = false;
     int aborted_candidate_count_ = 0;
     std::string guard_triggered_stage_ = "none";
+    std::string v7_stats_;
 };
