@@ -31,10 +31,10 @@ int main() {
                 schedule = scheduler.solve();
             } else if (config_name == "portfolio_v4") {
                 schedule = scheduler.solve_v4();
-            } else if (config_name == "portfolio_v6") {
-                schedule = scheduler.solve_v6();
             } else if (config_name == "portfolio" ||
-                       config_name == "portfolio_v5" ||
+                       config_name == "portfolio_v6") {
+                schedule = scheduler.solve_v6();
+            } else if (config_name == "portfolio_v5" ||
                        config_name == "portfolio_v5_full") {
                 schedule = scheduler.solve_v5(
                     config_name == "portfolio_v5_full"
@@ -62,6 +62,10 @@ int main() {
                           << scheduler.repair_candidate_count() << '\n';
                 std::cerr << "portfolio_guard_triggered="
                           << (scheduler.guard_triggered() ? 1 : 0) << '\n';
+                std::cerr << "portfolio_aborted_count="
+                          << scheduler.aborted_candidate_count() << '\n';
+                std::cerr << "portfolio_guard_stage="
+                          << scheduler.guard_triggered_stage() << '\n';
             }
             write_schedule(std::cout, schedule);
             return 0;

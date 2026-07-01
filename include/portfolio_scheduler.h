@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <chrono>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -25,6 +26,8 @@ public:
     int cheap_candidate_count() const;
     int repair_candidate_count() const;
     bool guard_triggered() const;
+    int aborted_candidate_count() const;
+    const std::string& guard_triggered_stage() const;
 
 private:
     struct Candidate {
@@ -67,6 +70,12 @@ private:
         std::unordered_map<int, double> task_boosts,
         bool reservation_enabled = false
     ) const;
+    Candidate run_candidate_until(
+        const std::string& candidate_name,
+        SchedulerConfig config,
+        std::unordered_map<int, double> task_boosts,
+        std::chrono::steady_clock::time_point deadline
+    ) const;
     Candidate evaluate_schedule(
         const std::string& candidate_name,
         std::vector<Assignment> schedule
@@ -101,4 +110,6 @@ private:
     int cheap_candidate_count_ = 0;
     int repair_candidate_count_ = 0;
     bool guard_triggered_ = false;
+    int aborted_candidate_count_ = 0;
+    std::string guard_triggered_stage_ = "none";
 };

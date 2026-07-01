@@ -124,6 +124,22 @@ PortfolioScheduler::Candidate PortfolioScheduler::evaluate_schedule(
     return candidate;
 }
 
+PortfolioScheduler::Candidate PortfolioScheduler::run_candidate_until(
+    const std::string& candidate_name,
+    SchedulerConfig config,
+    std::unordered_map<int, double> task_boosts,
+    std::chrono::steady_clock::time_point deadline
+) const {
+    GreedyScheduler scheduler(
+        instance_,
+        std::move(config),
+        std::move(task_boosts),
+        ReservationConfig{},
+        deadline
+    );
+    return evaluate_schedule(candidate_name, scheduler.solve());
+}
+
 PortfolioScheduler::RepairBoosts PortfolioScheduler::analyze_repairs(
     const std::vector<Assignment>& baseline,
     double bad_task_percent,
@@ -947,100 +963,215 @@ SchedulerConfig PortfolioScheduler::random_config(
 
 std::vector<Assignment> PortfolioScheduler::solve_v6() {
     const auto started = std::chrono::steady_clock::now();
-    std::vector<Assignment> baseline = solve_v5(false);
+    const auto hard_deadline = started + std::chrono::seconds(54);
+    case_profile_ = classify_case();
+    cheap_candidate_count_ = 0;
+    repair_candidate_count_ = 0;
+    guard_triggered_ = false;
+    aborted_candidate_count_ = 0;
+    guard_triggered_stage_ = "none";
+
+    std::vector<Assignment> incumbent;
     try {
         const char* requested = std::getenv("SCHEDULER_PORTFOLIO_SELECTOR");
         if (requested == nullptr || *requested == '\0') selector_name_ = "leaderboard_proxy";
-        case_profile_ = classify_case();
-        cheap_candidate_count_ = 0;
-        repair_candidate_count_ = 0;
-        guard_triggered_ = false;
-        Candidate baseline_candidate = evaluate_schedule("v5_baseline", baseline);
-        std::vector<Candidate> candidates{baseline_candidate};
-
-        std::uint64_t state = 1469598103934665603ULL;
-        auto hash_value = [&state](std::uint64_t value) {
-            state ^= value;
-            state *= 1099511628211ULL;
-        };
-        for (const Server& server : instance_.servers) {
-            hash_value(server.id); hash_value(server.gpu_count);
-            hash_value(server.gpu_memory); hash_value(server.cpu_cores);
-            hash_value(server.memory);
-        }
-        for (const Task& task : instance_.tasks) {
-            hash_value(task.id); hash_value(task.release_time);
-            hash_value(task.duration); hash_value(task.min_gpu);
-            hash_value(task.total_gpu_memory); hash_value(task.weight);
-        }
-        for (char value : case_profile_) hash_value(static_cast<unsigned char>(value));
+        Candidate fast_baseline = run_candidate("fast_v1c", scheduler_config_from_name("v1c"), {});
+        incumbent = fast_baseline.schedule;
+        std::vector<Candidate> candidates{fast_baseline};
+        Candidate guard_reference = fast_baseline;
 
         auto elapsed = [&started]() {
             return std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - started
             ).count();
         };
-        const int cheap_limit = case_profile_ == "large_dense" ? 24 : 80;
-        for (int index = 0; index < cheap_limit; ++index) {
-            if (elapsed() >= 42.0) { guard_triggered_ = true; break; }
+        auto update_incumbent = [&]() {
+            const std::size_t best = select_best(candidates, &guard_reference);
+            incumbent = candidates[best].schedule;
+            selected_config_ = candidates[best].config_name;
+        };
+
+        if (elapsed() < 8.0) {
             try {
-                SchedulerConfig config = random_config(state, case_profile_, index);
-                candidates.push_back(run_candidate(config.name, std::move(config), {}));
-                ++cheap_candidate_count_;
-            } catch (const std::exception&) {
-                // Failed random candidates never affect the V5 incumbent.
+                candidates.push_back(run_candidate_until(
+                    "fast_v1d_light",
+                    scheduler_config_from_name("v1d_light"),
+                    {},
+                    std::min(hard_deadline, started + std::chrono::seconds(8))
+                ));
+            } catch (const std::exception&) { ++aborted_candidate_count_; }
+        }
+        if (elapsed() < 8.0) {
+            try {
+                SchedulerConfig light = scheduler_config_from_name("memory_first");
+                light.name = "memory_first_light";
+                light.memory_aware_score.w_duration_memory_waste *= 0.6;
+                const std::string light_name = light.name;
+                candidates.push_back(run_candidate_until(
+                    light_name, std::move(light), {},
+                    std::min(hard_deadline, started + std::chrono::seconds(8))
+                ));
+            } catch (const std::exception&) { ++aborted_candidate_count_; }
+        }
+        update_incumbent();
+
+        const std::array<CandidateSpec, 3> medium_specs = {{
+            {"memory_r2_p3_b12", "memory_first", "memory", 3, 1.2, 1.10, 1, 1, 2, true},
+            {"combo_r2_p3_b12", "wait_memory_balance", "combo", 3, 1.2, 1.05, 1.05, 1, 2, true},
+            {"memory_r3_p5_b14", "memory_first", "memory", 5, 1.4, 1.15, 1, 1, 3, true},
+        }};
+        for (const CandidateSpec& spec : medium_specs) {
+            if (elapsed() >= 25.0) {
+                guard_triggered_ = true;
+                guard_triggered_stage_ = "medium";
+                break;
+            }
+            try {
+                RepairBoosts boosts = analyze_repairs(
+                    incumbent, spec.bad_task_percent, spec.boost_strength
+                );
+                SchedulerConfig config = scheduler_config_from_name(spec.base_config);
+                config.name = spec.candidate_name;
+                config.server_score.w_gpu_memory_fragment *= spec.memory_weight_scale;
+                config.memory_aware_score.w_duration_memory_waste *= spec.memory_weight_scale;
+                auto task_boosts = spec.repair_type == "memory"
+                    ? boosts.memory_top : boosts.combo_top;
+                Candidate candidate = run_candidate_until(
+                    spec.candidate_name,
+                    config,
+                    task_boosts,
+                    hard_deadline
+                );
+                if (spec.round_count == 3 && elapsed() < 25.0) {
+                    RepairBoosts next = analyze_repairs(
+                        candidate.schedule,
+                        spec.bad_task_percent,
+                        spec.boost_strength
+                    );
+                    candidate = run_candidate_until(
+                        spec.candidate_name,
+                        std::move(config),
+                        std::move(next.memory_top),
+                        hard_deadline
+                    );
+                }
+                candidates.push_back(std::move(candidate));
+                update_incumbent();
+            } catch (const std::exception&) { ++aborted_candidate_count_; }
+        }
+
+        if (elapsed() < 25.0 &&
+            (case_profile_ != "large_dense" || elapsed() < 5.0)) {
+            try {
+                std::vector<Assignment> v5_schedule = solve_v5(false);
+                selector_name_ = "leaderboard_proxy";
+                Candidate v5 = evaluate_schedule("v5_heavy", std::move(v5_schedule));
+                candidates.push_back(v5);
+                guard_reference = v5;
+                update_incumbent();
+            } catch (const std::exception&) { ++aborted_candidate_count_; }
+        }
+        if (elapsed() > 45.0) {
+            guard_triggered_ = true;
+            guard_triggered_stage_ = "heavy";
+        } else {
+            std::uint64_t state = 1469598103934665603ULL;
+            auto hash_value = [&state](std::uint64_t value) {
+                state ^= value; state *= 1099511628211ULL;
+            };
+            for (const Server& server : instance_.servers) {
+                hash_value(server.id); hash_value(server.gpu_count);
+                hash_value(server.gpu_memory); hash_value(server.memory);
+            }
+            for (const Task& task : instance_.tasks) {
+                hash_value(task.id); hash_value(task.release_time);
+                hash_value(task.duration); hash_value(task.total_gpu_memory);
+            }
+            std::vector<double> probe_times;
+            const int profile_limit = case_profile_ == "large_dense" ? 8 :
+                (instance_.tasks.size() >= 1500 ? 25 : 50);
+            for (int index = 0; index < 3 && elapsed() < 42.0; ++index) {
+                const auto probe_started = std::chrono::steady_clock::now();
+                try {
+                    SchedulerConfig config = random_config(state, case_profile_, index);
+                    const std::string config_name = config.name;
+                    candidates.push_back(run_candidate_until(
+                        config_name, std::move(config), {}, hard_deadline
+                    ));
+                    ++cheap_candidate_count_;
+                    update_incumbent();
+                } catch (const std::exception&) { ++aborted_candidate_count_; }
+                probe_times.push_back(std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - probe_started
+                ).count());
+            }
+            const double average_probe = probe_times.empty() ? 100.0 :
+                std::accumulate(probe_times.begin(), probe_times.end(), 0.0) /
+                    probe_times.size();
+            int more = 0;
+            if (average_probe <= 4.0 && elapsed() < 42.0) {
+                more = static_cast<int>((54.0 - elapsed()) /
+                    std::max(average_probe, 0.001));
+                more = std::min(more, profile_limit - cheap_candidate_count_);
+                if (average_probe > 2.0) more = std::min(more, 3);
+            }
+            for (int offset = 0; offset < more && elapsed() < 42.0; ++offset) {
+                try {
+                    SchedulerConfig config = random_config(
+                        state, case_profile_, cheap_candidate_count_
+                    );
+                    const std::string config_name = config.name;
+                    candidates.push_back(run_candidate_until(
+                        config_name, std::move(config), {}, hard_deadline
+                    ));
+                    ++cheap_candidate_count_;
+                    update_incumbent();
+                } catch (const std::exception&) { ++aborted_candidate_count_; }
             }
         }
 
-        if (cheap_candidate_count_ == 0) {
-            valid_candidates_ = "v5_baseline";
-            candidate_metrics_ = "v5_baseline:" +
-                std::to_string(baseline_candidate.e_wait) + ":" +
-                std::to_string(baseline_candidate.e_memory_new) + ":" +
-                std::to_string(baseline_candidate.e_finish);
-            selected_config_ = "v5_baseline";
-            return baseline;
-        }
-
-        select_best(candidates, &baseline_candidate);
+        double remaining = 54.0 - elapsed();
+        int repairs_allowed = remaining > 14.0 ? 3 : (remaining > 8.0 ? 1 : 0);
+        select_best(candidates, &guard_reference);
         std::vector<std::size_t> order(candidates.size());
         std::iota(order.begin(), order.end(), 0);
         std::sort(order.begin(), order.end(), [&candidates](std::size_t left, std::size_t right) {
             return candidates[left].primary_score < candidates[right].primary_score;
         });
-        const std::size_t repair_count = std::min<std::size_t>(5, order.size());
-        for (std::size_t rank = 0; rank < repair_count; ++rank) {
-            if (elapsed() >= 54.0) { guard_triggered_ = true; break; }
-            const Candidate& source = candidates[order[rank]];
-            RepairBoosts boosts = analyze_repairs(source.schedule, 5.0, 1.4);
-            SchedulerConfig config;
-            std::unordered_map<int, double> task_boosts;
-            std::string name;
-            if (rank == 0 || rank == 1) {
-                const bool memory = rank == 0;
-                name = memory ? "top1_memory_repair" : "top1_combo_repair";
-                config = scheduler_config_from_name(memory ? "memory_first" : "wait_memory_balance");
-                task_boosts = memory ? boosts.memory_top : boosts.combo_top;
-            } else if (rank == 2 || rank == 3) {
-                const bool memory = rank == 2;
-                name = memory ? "top2_memory_repair" : "top2_combo_repair";
-                config = scheduler_config_from_name(memory ? "memory_first" : "wait_memory_balance");
-                task_boosts = memory ? boosts.memory_top : boosts.combo_top;
-            } else {
-                name = "top3_wait_memory_repair";
-                config = scheduler_config_from_name("wait_memory_balance");
-                task_boosts = boosts.memory_top;
-                for (const auto& [task_id, value] : boosts.wait_top) task_boosts[task_id] += value;
+        for (int rank = 0; rank < repairs_allowed &&
+             rank < static_cast<int>(order.size()); ++rank) {
+            if (elapsed() >= 54.0) {
+                guard_triggered_ = true;
+                guard_triggered_stage_ = "repair";
+                break;
             }
-            config.name = name;
             try {
-                candidates.push_back(run_candidate(name, std::move(config), std::move(task_boosts)));
+                RepairBoosts boosts = analyze_repairs(
+                    candidates[order[rank]].schedule, 5.0, 1.4
+                );
+                const bool memory = rank != 1;
+                std::string name = "safe_top" + std::to_string(rank + 1) +
+                    (memory ? "_memory" : "_combo");
+                SchedulerConfig config = scheduler_config_from_name(
+                    memory ? "memory_first" : "wait_memory_balance"
+                );
+                config.name = name;
+                candidates.push_back(run_candidate_until(
+                    name,
+                    std::move(config),
+                    memory ? std::move(boosts.memory_top) :
+                             std::move(boosts.combo_top),
+                    hard_deadline
+                ));
                 ++repair_candidate_count_;
-            } catch (const std::exception&) {
-                // Invalid repairs are discarded.
-            }
+                update_incumbent();
+            } catch (const std::exception&) { ++aborted_candidate_count_; }
         }
 
+        if (elapsed() >= 54.0) {
+            guard_triggered_ = true;
+            guard_triggered_stage_ = "hard_stop";
+        }
         valid_candidates_.clear();
         candidate_metrics_.clear();
         for (const Candidate& candidate : candidates) {
@@ -1052,12 +1183,13 @@ std::vector<Assignment> PortfolioScheduler::solve_v6() {
                 std::to_string(candidate.e_memory_new) + ":" +
                 std::to_string(candidate.e_finish);
         }
-        const std::size_t best = select_best(candidates, &baseline_candidate);
-        selected_config_ = candidates[best].config_name;
-        return std::move(candidates[best].schedule);
+        update_incumbent();
+        return incumbent;
     } catch (const std::exception&) {
-        selected_config_ = "v5_baseline";
-        return baseline;
+        if (!incumbent.empty()) return incumbent;
+        selected_config_ = "v1c";
+        GreedyScheduler fallback(instance_, scheduler_config_from_name("v1c"));
+        return fallback.solve();
     }
 }
 
@@ -1091,4 +1223,12 @@ int PortfolioScheduler::repair_candidate_count() const {
 
 bool PortfolioScheduler::guard_triggered() const {
     return guard_triggered_;
+}
+
+int PortfolioScheduler::aborted_candidate_count() const {
+    return aborted_candidate_count_;
+}
+
+const std::string& PortfolioScheduler::guard_triggered_stage() const {
+    return guard_triggered_stage_;
 }

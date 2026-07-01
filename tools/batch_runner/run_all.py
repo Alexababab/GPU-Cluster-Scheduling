@@ -36,6 +36,8 @@ class RunResult:
     cheap_candidate_count: int = 0
     repair_candidate_count: int = 0
     guard_triggered: bool = False
+    aborted_candidate_count: int = 0
+    guard_triggered_stage: str = "none"
     error: str = ""
 
     @property
@@ -125,6 +127,10 @@ def run_scheduler(
                 result.repair_candidate_count = int(line.split("=", 1)[1])
             elif line.startswith("portfolio_guard_triggered="):
                 result.guard_triggered = line.split("=", 1)[1].strip() == "1"
+            elif line.startswith("portfolio_aborted_count="):
+                result.aborted_candidate_count = int(line.split("=", 1)[1])
+            elif line.startswith("portfolio_guard_stage="):
+                result.guard_triggered_stage = line.split("=", 1)[1].strip()
             elif line.strip():
                 remaining_stderr.append(line.strip())
         if remaining_stderr:
@@ -241,6 +247,8 @@ def write_metadata(path: Path, result: RunResult) -> None:
         "cheap_candidate_count": result.cheap_candidate_count,
         "repair_candidate_count": result.repair_candidate_count,
         "guard_triggered": result.guard_triggered,
+        "aborted_candidate_count": result.aborted_candidate_count,
+        "guard_triggered_stage": result.guard_triggered_stage,
         "error": result.error,
     }
     text = "".join(f"{key}={value}\n" for key, value in fields.items())
@@ -273,6 +281,8 @@ def export_csv(path: Path, results: list[RunResult]) -> None:
                 "cheap_candidate_count",
                 "repair_candidate_count",
                 "guard_triggered",
+                "aborted_candidate_count",
+                "guard_triggered_stage",
                 "error",
             ]
         )
@@ -307,6 +317,8 @@ def export_csv(path: Path, results: list[RunResult]) -> None:
                     result.cheap_candidate_count,
                     result.repair_candidate_count,
                     int(result.guard_triggered),
+                    result.aborted_candidate_count,
+                    result.guard_triggered_stage,
                     result.error,
                 ]
             )

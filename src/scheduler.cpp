@@ -10,12 +10,14 @@ GreedyScheduler::GreedyScheduler(
     const Instance& instance,
     SchedulerConfig config,
     std::unordered_map<int, double> task_boosts,
-    ReservationConfig reservation
+    ReservationConfig reservation,
+    std::chrono::steady_clock::time_point deadline
 )
     : config_(std::move(config)),
       tasks_(instance.tasks),
       task_boosts_(std::move(task_boosts)),
-      reservation_(reservation) {
+      reservation_(reservation),
+      deadline_(deadline) {
     std::sort(
         tasks_.begin(),
         tasks_.end(),
@@ -318,8 +320,10 @@ GreedyScheduler::StartChoice GreedyScheduler::choose_start_scored(
     StartChoice best;
     double best_score = std::numeric_limits<double>::infinity();
 
+    int placement_checks = 0;
     for (const FeasiblePlacement& placement :
          feasible_placements_[static_cast<std::size_t>(task_index)]) {
+        if ((++placement_checks & 31) == 0) check_deadline();
         const ServerState& server = servers_[placement.server_index];
 
         // Filter stage: permanent feasibility is precomputed; this checks
@@ -391,6 +395,7 @@ void GreedyScheduler::order_pending_tasks(
     std::vector<int>& pending_task_indices,
     long long current_time
 ) const {
+    check_deadline();
     if (!config_.task_score.enabled) {
         return;
     }
@@ -409,6 +414,12 @@ void GreedyScheduler::order_pending_tasks(
             return tasks_[left_index].id < tasks_[right_index].id;
         }
     );
+}
+
+void GreedyScheduler::check_deadline() const {
+    if (std::chrono::steady_clock::now() >= deadline_) {
+        throw std::runtime_error("candidate deadline exceeded");
+    }
 }
 
 std::vector<int> GreedyScheduler::select_anchor_tasks(
@@ -517,7 +528,9 @@ bool GreedyScheduler::start_ready_tasks(
     std::vector<int> still_pending;
     still_pending.reserve(pending_task_indices.size());
 
+    int pending_checks = 0;
     for (const int task_index : pending_task_indices) {
+        if ((++pending_checks & 31) == 0) check_deadline();
         const Task& task = tasks_[task_index];
         const StartChoice choice = choose_start(task_index);
         if (choice.server_index == -1) {
@@ -605,6 +618,7 @@ std::vector<Assignment> GreedyScheduler::solve() {
     long long current_time = tasks_.front().release_time;
 
     while (assignments.size() < tasks_.size()) {
+        check_deadline();
         release_finished(current_time, finish_events);
 
         while (next_task_index < tasks_.size() &&
@@ -644,6 +658,7 @@ std::vector<Assignment> GreedyScheduler::solve() {
             throw std::logic_error("scheduler cannot reach a future event");
         }
         current_time = next_event_time;
+        check_deadline();
     }
 
     std::sort(

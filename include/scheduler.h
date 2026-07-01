@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <queue>
 #include <unordered_map>
 #include <vector>
@@ -20,7 +21,9 @@ public:
         const Instance& instance,
         SchedulerConfig config = SchedulerConfig{},
         std::unordered_map<int, double> task_boosts = {},
-        ReservationConfig reservation = {}
+        ReservationConfig reservation = {},
+        std::chrono::steady_clock::time_point deadline =
+            std::chrono::steady_clock::time_point::max()
     );
 
     std::vector<Assignment> solve();
@@ -103,6 +106,7 @@ private:
         std::vector<int>& pending_task_indices,
         long long current_time
     ) const;
+    void check_deadline() const;
     std::vector<int> select_anchor_tasks(
         const std::vector<int>& pending_task_indices,
         long long current_time
@@ -123,4 +127,5 @@ private:
     std::vector<TaskFeatures> task_features_;
     std::unordered_map<int, double> task_boosts_;
     ReservationConfig reservation_;
+    std::chrono::steady_clock::time_point deadline_;
 };
