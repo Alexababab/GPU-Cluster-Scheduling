@@ -38,6 +38,7 @@ class RunResult:
     guard_triggered: bool = False
     aborted_candidate_count: int = 0
     guard_triggered_stage: str = "none"
+    pathology_stats: str = ""
     error: str = ""
 
     @property
@@ -95,8 +96,9 @@ def run_scheduler(
                                 "portfolio_v3_full",
                                 "portfolio_v4",
                                 "portfolio_v5",
-                            "portfolio_v5_full",
-                            "portfolio_v6",
+                                "portfolio_v5_full",
+                                "portfolio_v6",
+                                "portfolio_v9_lite",
                             }
                             else {}
                         ),
@@ -131,6 +133,8 @@ def run_scheduler(
                 result.aborted_candidate_count = int(line.split("=", 1)[1])
             elif line.startswith("portfolio_guard_stage="):
                 result.guard_triggered_stage = line.split("=", 1)[1].strip()
+            elif line.startswith("portfolio_pathology_stats="):
+                result.pathology_stats = line.split("=", 1)[1].strip()
             elif line.strip():
                 remaining_stderr.append(line.strip())
         if remaining_stderr:
@@ -249,6 +253,7 @@ def write_metadata(path: Path, result: RunResult) -> None:
         "guard_triggered": result.guard_triggered,
         "aborted_candidate_count": result.aborted_candidate_count,
         "guard_triggered_stage": result.guard_triggered_stage,
+        "pathology_stats": result.pathology_stats,
         "error": result.error,
     }
     text = "".join(f"{key}={value}\n" for key, value in fields.items())
@@ -283,6 +288,7 @@ def export_csv(path: Path, results: list[RunResult]) -> None:
                 "guard_triggered",
                 "aborted_candidate_count",
                 "guard_triggered_stage",
+                "pathology_stats",
                 "error",
             ]
         )
@@ -319,6 +325,7 @@ def export_csv(path: Path, results: list[RunResult]) -> None:
                     int(result.guard_triggered),
                     result.aborted_candidate_count,
                     result.guard_triggered_stage,
+                    result.pathology_stats,
                     result.error,
                 ]
             )

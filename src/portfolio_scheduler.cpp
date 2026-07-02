@@ -9,6 +9,7 @@
 #include <limits>
 #include <numeric>
 #include <random>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 
@@ -1193,6 +1194,486 @@ std::vector<Assignment> PortfolioScheduler::solve_v6() {
     }
 }
 
+std::vector<Assignment> PortfolioScheduler::solve_v9_lite() {
+    const auto started = std::chrono::steady_clock::now();
+    std::vector<Assignment> baseline = solve_v6();
+    Candidate incumbent = evaluate_schedule("v6_safe_baseline", baseline);
+    selected_config_ = incumbent.config_name;
+
+    struct Diagnostic {
+        const Task* task = nullptr;
+        const Server* server = nullptr;
+        const Assignment* assignment = nullptr;
+        double wait_cost = 0.0;
+        double memory_waste = 0.0;
+        int feasible_count = 0;
+    };
+    std::unordered_map<int, const Task*> tasks;
+    std::unordered_map<int, const Server*> servers;
+    for (const Task& task : instance_.tasks) tasks[task.id] = &task;
+    for (const Server& server : instance_.servers) servers[server.id] = &server;
+
+    std::vector<Diagnostic> diagnostics;
+    diagnostics.reserve(baseline.size());
+    double total_wait = 0.0;
+    double total_memory = 0.0;
+    long long min_start = std::numeric_limits<long long>::max();
+    for (const Assignment& assignment : baseline) {
+        const Task& task = *tasks.at(assignment.task_id);
+        const Server& server = *servers.at(assignment.server_id);
+        int feasible = 0;
+        for (const Server& option : instance_.servers) {
+            const int gpu_for_memory = static_cast<int>(
+                (task.total_gpu_memory + option.gpu_memory - 1LL) /
+                option.gpu_memory
+            );
+            const int needed_gpu = std::max(task.min_gpu, gpu_for_memory);
+            feasible += needed_gpu <= option.gpu_count &&
+                task.cpu_cores <= option.cpu_cores &&
+                task.memory <= option.memory;
+        }
+        const double wait = static_cast<double>(std::max(
+            0LL, assignment.start_time - task.release_time
+        )) * task.weight;
+        const double waste = static_cast<double>(task.duration) * std::max(
+            0LL,
+            1LL * assignment.gpu_count * server.gpu_memory -
+                task.total_gpu_memory
+        );
+        diagnostics.push_back({&task, &server, &assignment, wait, waste, feasible});
+        total_wait += wait;
+        total_memory += waste;
+        min_start = std::min(min_start, assignment.start_time);
+    }
+
+    auto descending_wait = diagnostics;
+    std::sort(descending_wait.begin(), descending_wait.end(),
+        [](const Diagnostic& left, const Diagnostic& right) {
+            return left.wait_cost > right.wait_cost;
+        });
+    auto descending_memory = diagnostics;
+    std::sort(descending_memory.begin(), descending_memory.end(),
+        [](const Diagnostic& left, const Diagnostic& right) {
+            return left.memory_waste > right.memory_waste;
+        });
+    const std::size_t top5_count = std::max<std::size_t>(
+        1, (diagnostics.size() + 19) / 20
+    );
+    const std::size_t memory_hotspot_count = std::max<std::size_t>(
+        1, (diagnostics.size() * 3 + 9) / 10
+    );
+    const double top1_wait_share = total_wait <= 0.0 ? 0.0 :
+        descending_wait.front().wait_cost / total_wait;
+    double top5_wait = 0.0;
+    for (std::size_t i = 0; i < top5_count; ++i) {
+        top5_wait += descending_wait[i].wait_cost;
+    }
+    const double top5_wait_share = total_wait <= 0.0 ? 0.0 :
+        top5_wait / total_wait;
+    double top_memory = 0.0;
+    for (std::size_t i = 0; i < memory_hotspot_count; ++i) {
+        top_memory += descending_memory[i].memory_waste;
+    }
+    const double memory_hotspot = total_memory <= 0.0 ? 0.0 :
+        top_memory / total_memory;
+
+    std::vector<int> weights;
+    std::vector<int> feasible_counts;
+    for (const Diagnostic& item : diagnostics) {
+        weights.push_back(item.task->weight);
+        feasible_counts.push_back(item.feasible_count);
+    }
+    std::sort(weights.begin(), weights.end());
+    std::sort(feasible_counts.begin(), feasible_counts.end());
+    const int weight_p90 = weights[std::min(
+        weights.size() - 1, weights.size() * 9 / 10
+    )];
+    const int feasible_p25 = feasible_counts[std::min(
+        feasible_counts.size() - 1, feasible_counts.size() / 4
+    )];
+    const Diagnostic& dominant = descending_wait.front();
+
+    const long long tail_span = std::max<long long>(
+        1, incumbent.e_finish - min_start
+    );
+    const long long tail_start = incumbent.e_finish -
+        std::max<long long>(1, tail_span / 10);
+    std::vector<const Diagnostic*> tail_tasks;
+    std::unordered_map<int, int> active_tail_servers;
+    for (const Diagnostic& item : diagnostics) {
+        if (item.assignment->finish_time >= tail_start) {
+            tail_tasks.push_back(&item);
+            ++active_tail_servers[item.assignment->server_id];
+        }
+    }
+    const int tail_limit = diagnostics.size() < 1000 ? 80 :
+        (diagnostics.size() < 3000 ? 50 : 30);
+    const double tail_hotspot = diagnostics.empty() ? 0.0 :
+        1.0 - std::min(1.0,
+            static_cast<double>(tail_tasks.size()) /
+            std::max(1.0, diagnostics.size() * 0.25));
+
+    int shape_mismatch_count = 0;
+    for (const Diagnostic& item : diagnostics) {
+        const int residual_gpu = item.server->gpu_count -
+            item.assignment->gpu_count;
+        if (residual_gpu > 0 &&
+            (item.task->cpu_cores * item.server->gpu_count >
+             item.server->cpu_cores * item.assignment->gpu_count ||
+             item.task->memory * item.server->gpu_count >
+             item.server->memory * item.assignment->gpu_count)) {
+            ++shape_mismatch_count;
+        }
+    }
+    const double stranded_score = diagnostics.empty() ? 0.0 :
+        static_cast<double>(shape_mismatch_count) / diagnostics.size();
+
+    std::vector<const Diagnostic*> blockers;
+    if (total_wait > 0.0) {
+        for (const Diagnostic& item : diagnostics) {
+            if (item.task->id == dominant.task->id) continue;
+            if (item.assignment->start_time < dominant.assignment->start_time &&
+                item.assignment->finish_time > dominant.task->release_time) {
+                const Server& option = *item.server;
+                const int gpu_for_memory = static_cast<int>(
+                    (dominant.task->total_gpu_memory + option.gpu_memory - 1LL) /
+                    option.gpu_memory
+                );
+                if (std::max(dominant.task->min_gpu, gpu_for_memory) <=
+                    option.gpu_count) {
+                    blockers.push_back(&item);
+                }
+            }
+        }
+        std::sort(blockers.begin(), blockers.end(),
+            [&dominant](const Diagnostic* left, const Diagnostic* right) {
+                const long long left_overlap = std::min(
+                    left->assignment->finish_time,
+                    dominant.assignment->start_time
+                ) - std::max(
+                    left->assignment->start_time,
+                    dominant.task->release_time
+                );
+                const long long right_overlap = std::min(
+                    right->assignment->finish_time,
+                    dominant.assignment->start_time
+                ) - std::max(
+                    right->assignment->start_time,
+                    dominant.task->release_time
+                );
+                return left_overlap > right_overlap;
+            });
+        if (blockers.size() > 12) blockers.resize(12);
+    }
+
+    const bool tail_trigger = tail_hotspot >= 0.60 &&
+        !tail_tasks.empty() && static_cast<int>(tail_tasks.size()) <= tail_limit &&
+        active_tail_servers.size() > 1;
+    const bool memory_trigger = memory_hotspot >= 0.55 &&
+        descending_memory.front().memory_waste > 0.0;
+    const bool shape_trigger = stranded_score >= 0.30;
+    const bool blocker_trigger = total_wait > 0.0 &&
+        (top1_wait_share >= 0.70 || top5_wait_share >= 0.90) &&
+        dominant.task->weight >= weight_p90 &&
+        dominant.feasible_count <= feasible_p25 &&
+        !blockers.empty() && blockers.size() <= 12;
+
+    std::array<int, 4> triggered = {{
+        tail_trigger, memory_trigger, shape_trigger, blocker_trigger
+    }};
+    std::array<int, 4> run = {{0, 0, 0, 0}};
+    std::array<int, 4> accepted = {{0, 0, 0, 0}};
+    std::array<int, 6> rejected = {{0, 0, 0, 0, 0, 0}};
+    int skipped_time = 0;
+    const auto patch_deadline = std::min(
+        started + std::chrono::seconds(55),
+        std::chrono::steady_clock::now() + std::chrono::seconds(12)
+    );
+    auto elapsed = [&]() {
+        return std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - started
+        ).count();
+    };
+    auto try_patch = [&](int index, const std::string& name,
+                         SchedulerConfig config,
+                         std::unordered_map<int, double> boosts) {
+        if (!triggered[index]) return;
+        if (elapsed() > 52.0 || std::chrono::steady_clock::now() >= patch_deadline) {
+            ++skipped_time;
+            return;
+        }
+        ++run[index];
+        try {
+            const auto candidate_deadline = std::min(
+                patch_deadline,
+                std::chrono::steady_clock::now() + std::chrono::seconds(5)
+            );
+            Candidate candidate = run_candidate_until(
+                name, std::move(config), std::move(boosts), candidate_deadline
+            );
+            if (!valid_candidates_.empty()) valid_candidates_ += ',';
+            valid_candidates_ += candidate.config_name;
+            if (!candidate_metrics_.empty()) candidate_metrics_ += ';';
+            candidate_metrics_ += candidate.config_name + ":" +
+                std::to_string(candidate.e_wait) + ":" +
+                std::to_string(candidate.e_memory_new) + ":" +
+                std::to_string(candidate.e_finish);
+            const double wait_limit = index == 0 ? 1.003 :
+                (index == 1 || index == 2 ? 1.005 : 0.50);
+            const double memory_limit = index == 0 ? 1.003 :
+                (index == 1 ? 0.997 : (index == 2 ? 1.0 : 1.02));
+            const double finish_limit = index == 0 ? 1.0 :
+                (index == 1 || index == 2 || index == 3 ? 1.002 : 1.005);
+            const double wait_slack = incumbent.e_wait == 0.0 ? 8.0 : 0.0;
+            const bool wait_ok = candidate.e_wait <=
+                incumbent.e_wait * wait_limit + wait_slack;
+            const bool memory_ok = candidate.e_memory_new <=
+                incumbent.e_memory_new * memory_limit;
+            const bool finish_ok = candidate.e_finish <=
+                incumbent.e_finish * finish_limit;
+            const double proxy =
+                (candidate.e_wait - incumbent.e_wait) /
+                    std::max(1.0, incumbent.e_wait) +
+                1.25 * (candidate.e_memory_new - incumbent.e_memory_new) /
+                    std::max(1.0, incumbent.e_memory_new) +
+                (static_cast<double>(candidate.e_finish) - incumbent.e_finish) /
+                    std::max(1.0, static_cast<double>(incumbent.e_finish));
+            if (!wait_ok) ++rejected[0];
+            if (!memory_ok) ++rejected[1];
+            if (!finish_ok) ++rejected[2];
+            if (proxy >= 0.0) ++rejected[3];
+            if (wait_ok && memory_ok && finish_ok && proxy < 0.0) {
+                incumbent = std::move(candidate);
+                selected_config_ = incumbent.config_name;
+                ++accepted[index];
+            }
+        } catch (const std::exception&) {
+            ++rejected[5];
+            ++aborted_candidate_count_;
+        }
+    };
+
+    RepairBoosts common = analyze_repairs(baseline, 5.0, 1.0);
+    SchedulerConfig tail_config = scheduler_config_from_name("finish_aggressive");
+    tail_config.memory_aware_score.enabled = true;
+    tail_config.memory_aware_score.w_duration_memory_waste = 8.0;
+    try_patch(0, "window_tail_repack", std::move(tail_config), common.finish_tail);
+
+    if (memory_trigger) {
+        if (elapsed() > 52.0 || std::chrono::steady_clock::now() >= patch_deadline) {
+            ++skipped_time;
+        } else {
+            ++run[1];
+            std::vector<Assignment> rematched = baseline;
+            double working_memory = incumbent.e_memory_new;
+            const std::size_t task_limit = std::min<std::size_t>(
+                90, descending_memory.size()
+            );
+            for (std::size_t rank = 0; rank < task_limit; ++rank) {
+                if (std::chrono::steady_clock::now() >= patch_deadline) break;
+                const Diagnostic& hotspot = descending_memory[rank];
+                if (hotspot.memory_waste <= 0.0) break;
+                auto assignment_it = std::find_if(
+                    rematched.begin(), rematched.end(),
+                    [&hotspot](const Assignment& assignment) {
+                        return assignment.task_id == hotspot.task->id;
+                    }
+                );
+                if (assignment_it == rematched.end()) continue;
+                Assignment best_assignment = *assignment_it;
+                double best_memory = working_memory;
+                for (const Server& option : instance_.servers) {
+                    const int gpu_for_memory = static_cast<int>(
+                        (hotspot.task->total_gpu_memory + option.gpu_memory - 1LL) /
+                        option.gpu_memory
+                    );
+                    const int gpu_count = std::max(
+                        hotspot.task->min_gpu, gpu_for_memory
+                    );
+                    if (gpu_count > option.gpu_count ||
+                        hotspot.task->cpu_cores > option.cpu_cores ||
+                        hotspot.task->memory > option.memory) continue;
+                    const long long new_waste = 1LL * hotspot.task->duration *
+                        (1LL * gpu_count * option.gpu_memory -
+                         hotspot.task->total_gpu_memory);
+                    const long long old_waste = 1LL * hotspot.task->duration *
+                        (1LL * best_assignment.gpu_count *
+                         servers.at(best_assignment.server_id)->gpu_memory -
+                         hotspot.task->total_gpu_memory);
+                    if (new_waste >= old_waste) continue;
+                    const Assignment original = *assignment_it;
+                    assignment_it->server_id = option.id;
+                    assignment_it->gpu_count = gpu_count;
+                    try {
+                        Candidate trial = evaluate_schedule(
+                            "memory_window_probe", rematched
+                        );
+                        if (trial.e_memory_new < best_memory) {
+                            best_memory = trial.e_memory_new;
+                            best_assignment = *assignment_it;
+                        }
+                    } catch (const std::exception&) {
+                    }
+                    *assignment_it = original;
+                }
+                *assignment_it = best_assignment;
+                working_memory = best_memory;
+            }
+            std::vector<std::size_t> hotspot_indices;
+            for (std::size_t rank = 0; rank < task_limit; ++rank) {
+                const int task_id = descending_memory[rank].task->id;
+                const auto it = std::find_if(
+                    rematched.begin(), rematched.end(),
+                    [task_id](const Assignment& assignment) {
+                        return assignment.task_id == task_id;
+                    }
+                );
+                if (it != rematched.end()) {
+                    hotspot_indices.push_back(
+                        static_cast<std::size_t>(it - rematched.begin())
+                    );
+                }
+            }
+            for (std::size_t left = 0; left < hotspot_indices.size(); ++left) {
+                if (std::chrono::steady_clock::now() >= patch_deadline) break;
+                const std::size_t window_end = std::min(
+                    hotspot_indices.size(), (left / 30 + 1) * 30
+                );
+                for (std::size_t right = left + 1;
+                     right < window_end; ++right) {
+                    if (std::chrono::steady_clock::now() >= patch_deadline) break;
+                    Assignment& first = rematched[hotspot_indices[left]];
+                    Assignment& second = rematched[hotspot_indices[right]];
+                    if (first.server_id == second.server_id) continue;
+                    const Task& first_task = *tasks.at(first.task_id);
+                    const Task& second_task = *tasks.at(second.task_id);
+                    const Server& first_target = *servers.at(second.server_id);
+                    const Server& second_target = *servers.at(first.server_id);
+                    const int first_gpu = std::max(
+                        first_task.min_gpu,
+                        static_cast<int>((first_task.total_gpu_memory +
+                            first_target.gpu_memory - 1LL) /
+                            first_target.gpu_memory)
+                    );
+                    const int second_gpu = std::max(
+                        second_task.min_gpu,
+                        static_cast<int>((second_task.total_gpu_memory +
+                            second_target.gpu_memory - 1LL) /
+                            second_target.gpu_memory)
+                    );
+                    if (first_gpu > first_target.gpu_count ||
+                        second_gpu > second_target.gpu_count ||
+                        first_task.cpu_cores > first_target.cpu_cores ||
+                        second_task.cpu_cores > second_target.cpu_cores ||
+                        first_task.memory > first_target.memory ||
+                        second_task.memory > second_target.memory) continue;
+                    const Assignment first_original = first;
+                    const Assignment second_original = second;
+                    first.server_id = first_target.id;
+                    first.gpu_count = first_gpu;
+                    second.server_id = second_target.id;
+                    second.gpu_count = second_gpu;
+                    try {
+                        Candidate trial = evaluate_schedule(
+                            "memory_window_swap_probe", rematched
+                        );
+                        if (trial.e_memory_new < working_memory) {
+                            working_memory = trial.e_memory_new;
+                            continue;
+                        }
+                    } catch (const std::exception&) {
+                    }
+                    first = first_original;
+                    second = second_original;
+                }
+            }
+            try {
+                Candidate candidate = evaluate_schedule(
+                    "memory_window_repack", std::move(rematched)
+                );
+                if (!valid_candidates_.empty()) valid_candidates_ += ',';
+                valid_candidates_ += candidate.config_name;
+                if (!candidate_metrics_.empty()) candidate_metrics_ += ';';
+                candidate_metrics_ += candidate.config_name + ":" +
+                    std::to_string(candidate.e_wait) + ":" +
+                    std::to_string(candidate.e_memory_new) + ":" +
+                    std::to_string(candidate.e_finish);
+                const bool memory_ok = candidate.e_memory_new <=
+                    evaluate_schedule("baseline_guard", baseline).e_memory_new * 0.997;
+                if (memory_ok) {
+                    incumbent = std::move(candidate);
+                    selected_config_ = incumbent.config_name;
+                    ++accepted[1];
+                } else {
+                    ++rejected[1];
+                }
+            } catch (const std::exception&) {
+                ++rejected[4];
+            }
+        }
+    }
+
+    SchedulerConfig shape_config = scheduler_config_from_name("v1d_strong");
+    shape_config.server_score.w_residual_imbalance = 5.0;
+    shape_config.server_score.w_cpu_fragment = 2.5;
+    shape_config.server_score.w_memory_fragment = 2.5;
+    try_patch(2, "fgd_tetris_rematch", std::move(shape_config), common.combo_top);
+
+    std::unordered_map<int, double> blocker_boosts;
+    blocker_boosts[dominant.task->id] = 5000.0;
+    double neighbor_boost = 120.0;
+    for (const Diagnostic* blocker : blockers) {
+        blocker_boosts[blocker->task->id] = neighbor_boost;
+        neighbor_boost *= 0.92;
+    }
+    SchedulerConfig blocker_config = scheduler_config_from_name("v1d_strong");
+    blocker_config.task_score.w_wait = 0.025;
+    blocker_config.server_score.w_residual_imbalance = 3.0;
+    blocker_config.server_score.w_cpu_fragment = 1.5;
+    blocker_config.server_score.w_memory_fragment = 1.5;
+    blocker_config.memory_aware_score.enabled = true;
+    blocker_config.memory_aware_score.w_duration_memory_waste = 24.0;
+    blocker_config.isolation_score.enabled = true;
+    blocker_config.isolation_score.w_high_capacity_reserve = 2.0;
+    blocker_config.isolation_score.w_class_mismatch = 3.0;
+    try_patch(3, "blocker_chain_removal", blocker_config, blocker_boosts);
+    if (blocker_trigger && accepted[3] == 0) {
+        SchedulerConfig memory32 = blocker_config;
+        memory32.memory_aware_score.w_duration_memory_waste = 32.0;
+        try_patch(3, "blocker_chain_removal_m32", std::move(memory32),
+                  blocker_boosts);
+    }
+    if (blocker_trigger && accepted[3] == 0) {
+        SchedulerConfig memory48 = blocker_config;
+        memory48.memory_aware_score.w_duration_memory_waste = 48.0;
+        try_patch(3, "blocker_chain_removal_m48", std::move(memory48),
+                  blocker_boosts);
+    }
+
+    std::ostringstream stats;
+    stats << "trigger_tail:" << triggered[0]
+          << ";trigger_memory:" << triggered[1]
+          << ";trigger_shape:" << triggered[2]
+          << ";trigger_blocker:" << triggered[3]
+          << ";run_tail:" << run[0]
+          << ";run_memory:" << run[1]
+          << ";run_shape:" << run[2]
+          << ";run_blocker:" << run[3]
+          << ";accept_tail:" << accepted[0]
+          << ";accept_memory:" << accepted[1]
+          << ";accept_shape:" << accepted[2]
+          << ";accept_blocker:" << accepted[3]
+          << ";reject_wait:" << rejected[0]
+          << ";reject_memory:" << rejected[1]
+          << ";reject_finish:" << rejected[2]
+          << ";reject_proxy:" << rejected[3]
+          << ";reject_illegal:" << rejected[4]
+          << ";reject_timeout:" << rejected[5]
+          << ";skipped_time:" << skipped_time;
+    pathology_stats_ = stats.str();
+    return incumbent.schedule;
+}
+
 const std::string& PortfolioScheduler::selected_config() const {
     return selected_config_;
 }
@@ -1231,4 +1712,8 @@ int PortfolioScheduler::aborted_candidate_count() const {
 
 const std::string& PortfolioScheduler::guard_triggered_stage() const {
     return guard_triggered_stage_;
+}
+
+const std::string& PortfolioScheduler::pathology_stats() const {
+    return pathology_stats_;
 }

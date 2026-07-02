@@ -18,6 +18,7 @@ public:
     std::vector<Assignment> solve_v4();
     std::vector<Assignment> solve_v5(bool full_pool = false);
     std::vector<Assignment> solve_v6();
+    std::vector<Assignment> solve_v9_lite();
     const std::string& selected_config() const;
     const std::string& selector_name() const;
     const std::string& valid_candidates() const;
@@ -28,6 +29,7 @@ public:
     bool guard_triggered() const;
     int aborted_candidate_count() const;
     const std::string& guard_triggered_stage() const;
+    const std::string& pathology_stats() const;
 
 private:
     struct Candidate {
@@ -112,4 +114,5 @@ private:
     bool guard_triggered_ = false;
     int aborted_candidate_count_ = 0;
     std::string guard_triggered_stage_ = "none";
+    std::string pathology_stats_;
 };
