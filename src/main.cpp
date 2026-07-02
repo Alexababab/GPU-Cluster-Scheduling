@@ -17,6 +17,24 @@ int main() {
         const char* config_environment = std::getenv("SCHEDULER_CONFIG");
         const std::string config_name =
             config_environment == nullptr ? "v1b" : config_environment;
+        if (config_name.rfind("skeleton_", 0) == 0) {
+            PortfolioScheduler scheduler(instance);
+            const std::vector<Assignment> schedule =
+                scheduler.solve_skeleton(config_name.substr(9));
+            const char* trace_environment =
+                std::getenv("SCHEDULER_TRACE_SELECTION");
+            if (trace_environment != nullptr &&
+                std::string(trace_environment) == "1") {
+                std::cerr << "portfolio_selected="
+                          << scheduler.selected_config() << '\n';
+                std::cerr << "portfolio_profile="
+                          << scheduler.case_profile() << '\n';
+                std::cerr << "portfolio_v7_stats="
+                          << scheduler.v7_stats() << '\n';
+            }
+            write_schedule(std::cout, schedule);
+            return 0;
+        }
         if (config_name == "portfolio" ||
             config_name == "portfolio_v2_2" ||
             config_name == "portfolio_v3" ||

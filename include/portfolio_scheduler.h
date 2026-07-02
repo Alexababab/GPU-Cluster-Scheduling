@@ -19,6 +19,9 @@ public:
     std::vector<Assignment> solve_v5(bool full_pool = false);
     std::vector<Assignment> solve_v6();
     std::vector<Assignment> solve_v7();
+    std::vector<Assignment> solve_skeleton(
+        const std::string& skeleton_name
+    );
     const std::string& selected_config() const;
     const std::string& selector_name() const;
     const std::string& valid_candidates() const;
@@ -106,7 +109,8 @@ private:
         int operator_index,
         int beam_width,
         std::chrono::steady_clock::time_point deadline,
-        int& destroy_size
+        int& destroy_size,
+        int destroy_limit_override = 0
     ) const;
     std::vector<Assignment> fallback_to_v1c();
 

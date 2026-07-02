@@ -1199,7 +1199,8 @@ std::vector<Assignment> PortfolioScheduler::local_beam_repair(
     int operator_index,
     int beam_width,
     std::chrono::steady_clock::time_point deadline,
-    int& destroy_size
+    int& destroy_size,
+    int destroy_limit_override
 ) const {
     struct BadTask {
         Assignment assignment;
@@ -1288,9 +1289,12 @@ std::vector<Assignment> PortfolioScheduler::local_beam_repair(
         if (left.score != right.score) return left.score > right.score;
         return left.task->id < right.task->id;
     });
-    const int limit = instance_.tasks.size() < 500 ? 80 :
+    const int default_limit = instance_.tasks.size() < 500 ? 80 :
         (instance_.tasks.size() < 2500 ? 50 : 25);
-    destroy_size = std::min<int>(limit, std::max<int>(5, bad.size() / 50));
+    const int limit = destroy_limit_override > 0
+        ? destroy_limit_override : default_limit;
+    const int divisor = destroy_limit_override > 0 ? 10 : 50;
+    destroy_size = std::min<int>(limit, std::max<int>(5, bad.size() / divisor));
     destroy_size = std::min<int>(destroy_size, bad.size());
     bad.resize(destroy_size);
     std::unordered_set<int> destroyed;
@@ -1520,6 +1524,206 @@ std::vector<Assignment> PortfolioScheduler::solve_v7() {
         ";selected:" + selected_text +
         ";success:" + success_text;
     return incumbent;
+}
+
+std::vector<Assignment> PortfolioScheduler::solve_skeleton(
+    const std::string& skeleton_name
+) {
+    const auto started = std::chrono::steady_clock::now();
+    const auto deadline = started + std::chrono::seconds(55);
+    case_profile_ = classify_case();
+    try {
+        if (skeleton_name.rfind("window_", 0) == 0) {
+            std::vector<Assignment> baseline = solve_v6();
+            Candidate old = evaluate_schedule("v6_safe", baseline);
+            const int operator_index = skeleton_name == "window_memory_hotspot"
+                ? 0 : (skeleton_name == "window_wait_hotspot" ? 1 : 2);
+            const int window_limit = instance_.tasks.size() < 500 ? 120 :
+                (instance_.tasks.size() < 2500 ? 80 : 50);
+            const int beam_width = instance_.tasks.size() >= 2500 ? 4 :
+                (instance_.tasks.size() >= 500 ? 8 : 12);
+            int destroy_size = 0;
+            Candidate candidate;
+            try {
+                std::vector<Assignment> repaired = local_beam_repair(
+                    baseline,
+                    operator_index,
+                    beam_width,
+                    deadline,
+                    destroy_size,
+                    window_limit
+                );
+                candidate = evaluate_schedule(
+                    skeleton_name,
+                    std::move(repaired)
+                );
+            } catch (const std::exception&) {
+                selected_config_ = "v6_safe";
+                guard_triggered_ = true;
+                guard_triggered_stage_ = "skeleton_window";
+                v7_stats_ = "window:" + std::to_string(destroy_size) +
+                    ";beam:" + std::to_string(beam_width) +
+                    ";aborted:1";
+                return baseline;
+            }
+            const bool no_regret =
+                candidate.e_wait <= old.e_wait &&
+                candidate.e_memory_new <= old.e_memory_new &&
+                candidate.e_finish <= old.e_finish;
+            const bool improved =
+                candidate.e_wait < old.e_wait ||
+                candidate.e_memory_new < old.e_memory_new ||
+                candidate.e_finish < old.e_finish;
+            v7_stats_ = "window:" + std::to_string(destroy_size) +
+                ";beam:" + std::to_string(beam_width);
+            if (no_regret && improved) {
+                selected_config_ = skeleton_name;
+                return candidate.schedule;
+            }
+            selected_config_ = "v6_safe";
+            return baseline;
+        }
+
+        struct TaskFeature {
+            int id = 0;
+            double hard = 0.0;
+            double regret2 = 0.0;
+            double regret3 = 0.0;
+        };
+        double max_weight = 1.0;
+        double max_duration = 1.0;
+        double max_gpu = 1.0;
+        double max_memory = 1.0;
+        for (const Task& task : instance_.tasks) {
+            max_weight = std::max(max_weight, static_cast<double>(task.weight));
+            max_duration = std::max(max_duration, static_cast<double>(task.duration));
+            max_gpu = std::max(max_gpu, static_cast<double>(task.min_gpu));
+            max_memory = std::max(
+                max_memory,
+                static_cast<double>(task.total_gpu_memory)
+            );
+        }
+        std::vector<TaskFeature> features;
+        features.reserve(instance_.tasks.size());
+        for (const Task& task : instance_.tasks) {
+            std::vector<double> placement_costs;
+            for (const Server& server : instance_.servers) {
+                const int gpu = std::max(
+                    task.min_gpu,
+                    (task.total_gpu_memory + server.gpu_memory - 1) /
+                        server.gpu_memory
+                );
+                if (gpu > server.gpu_count || task.cpu_cores > server.cpu_cores ||
+                    task.memory > server.memory) continue;
+                const double memory_fit = static_cast<double>(task.duration) *
+                    (gpu * server.gpu_memory - task.total_gpu_memory);
+                const double gpu_ratio = static_cast<double>(gpu) / server.gpu_count;
+                const double cpu_ratio = static_cast<double>(task.cpu_cores) /
+                    server.cpu_cores;
+                const double ram_ratio = static_cast<double>(task.memory) /
+                    server.memory;
+                const double shape = std::max({gpu_ratio, cpu_ratio, ram_ratio}) -
+                    std::min({gpu_ratio, cpu_ratio, ram_ratio});
+                const int left_gpu = server.gpu_count - gpu;
+                const double fgd = left_gpu > 0 &&
+                    ((server.cpu_cores - task.cpu_cores) / left_gpu < 1 ||
+                     (server.memory - task.memory) / left_gpu < 1024)
+                    ? left_gpu * std::log1p(static_cast<double>(task.duration))
+                    : 0.0;
+                const double future = gpu_ratio * task.duration *
+                    server.gpu_memory * 0.01;
+                placement_costs.push_back(memory_fit +
+                    shape * task.duration * 1000.0 + fgd * 100.0 + future);
+            }
+            std::sort(placement_costs.begin(), placement_costs.end());
+            const double best = placement_costs.empty() ? 0.0 : placement_costs[0];
+            const double second = placement_costs.size() > 1
+                ? placement_costs[1] : best + 1e6;
+            const double third = placement_costs.size() > 2
+                ? placement_costs[2] : second + 5e5;
+            const double hardness = 1.0 /
+                std::max<std::size_t>(1, placement_costs.size());
+            const double pressure = placement_costs.empty() ? 1.0 :
+                best / (1.0 + task.duration * max_memory);
+            const double hard_score =
+                task.weight / max_weight +
+                task.duration / max_duration +
+                task.min_gpu / max_gpu +
+                task.total_gpu_memory / max_memory +
+                hardness + pressure +
+                (task.release_time + task.duration) /
+                    (1.0 + max_duration + task.release_time);
+            features.push_back(TaskFeature{
+                task.id, hard_score, second - best, third - best,
+            });
+        }
+
+        SchedulerConfig config = scheduler_config_from_name("v1d_strong");
+        config.name = skeleton_name;
+        config.server_score.w_residual_imbalance = 3.0;
+        config.server_score.w_cpu_fragment = 1.5;
+        config.server_score.w_memory_fragment = 1.5;
+        config.memory_aware_score.enabled = true;
+        config.memory_aware_score.w_duration_memory_waste = 24.0;
+        config.isolation_score.enabled = true;
+        config.isolation_score.w_high_capacity_reserve = 5.0;
+        config.isolation_score.w_class_mismatch = 3.0;
+        std::unordered_map<int, double> boosts;
+        int hard_count = 0;
+        int protected_count = 0;
+
+        if (skeleton_name.rfind("hard_p", 0) == 0) {
+            int percent = skeleton_name.find("p15") != std::string::npos ? 15 :
+                (skeleton_name.find("p10") != std::string::npos ? 10 : 5);
+            std::sort(features.begin(), features.end(), [](const TaskFeature& left, const TaskFeature& right) {
+                return left.hard > right.hard;
+            });
+            hard_count = std::max<int>(1, features.size() * percent / 100);
+            for (int index = 0; index < hard_count; ++index) {
+                boosts[features[index].id] = 2500.0 + 500.0 * features[index].regret2;
+            }
+            if (skeleton_name.find("slack_light") != std::string::npos) {
+                config.isolation_score.w_high_capacity_reserve = 2.0;
+                config.task_score.w_wait = 0.025;
+            } else {
+                config.task_score.w_wait = 0.010;
+            }
+        } else if (skeleton_name.rfind("reservation_top", 0) == 0) {
+            protected_count = skeleton_name.find("top10") != std::string::npos
+                ? 10 : (skeleton_name.find("top5") != std::string::npos ? 5 : 3);
+            std::sort(features.begin(), features.end(), [](const TaskFeature& left, const TaskFeature& right) {
+                return left.hard > right.hard;
+            });
+            for (int index = 0;
+                 index < std::min<int>(protected_count, features.size()); ++index) {
+                boosts[features[index].id] = 5000.0 + 300.0 * features[index].regret2;
+            }
+            config.isolation_score.w_high_capacity_reserve =
+                skeleton_name.find("strict") != std::string::npos ? 12.0 : 5.0;
+        } else {
+            const bool regret3 = skeleton_name == "regret3_all";
+            const bool hard_first = skeleton_name == "regret2_hard_first";
+            for (const TaskFeature& feature : features) {
+                boosts[feature.id] = 0.02 *
+                    (regret3 ? feature.regret3 : feature.regret2) +
+                    (hard_first ? 1500.0 * feature.hard : 0.0);
+            }
+            config.task_score.w_priority = 0.5;
+            config.task_score.w_wait = 0.018;
+        }
+        GreedyScheduler scheduler(
+            instance_, config, std::move(boosts), ReservationConfig{}, deadline
+        );
+        Candidate candidate = evaluate_schedule(skeleton_name, scheduler.solve());
+        selected_config_ = skeleton_name;
+        v7_stats_ = "hard:" + std::to_string(hard_count) +
+            ";protected:" + std::to_string(protected_count) +
+            ";window:0";
+        return candidate.schedule;
+    } catch (const std::exception&) {
+        selected_config_ = "v6_safe_fallback";
+        return solve_v6();
+    }
 }
 
 const std::string& PortfolioScheduler::selected_config() const {
