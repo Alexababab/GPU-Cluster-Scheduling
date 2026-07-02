@@ -1193,6 +1193,251 @@ std::vector<Assignment> PortfolioScheduler::solve_v6() {
     }
 }
 
+std::vector<Assignment> PortfolioScheduler::solve_v81_emergency() {
+    const auto started = std::chrono::steady_clock::now();
+    const auto deadline = started + std::chrono::seconds(55);
+    std::vector<Assignment> baseline = solve_v6();
+    Candidate baseline_metrics = evaluate_schedule("v6_safe", baseline);
+    int detector_triggered = 0;
+    int accepted = 0;
+    int rejected_wait = 0;
+    int rejected_memory = 0;
+    int rejected_finish = 0;
+    int skipped_time = 0;
+    int attempted = 0;
+
+    auto elapsed = [&started]() {
+        return std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - started
+        ).count();
+    };
+    auto finish_stats = [&]() {
+        emergency_stats_ =
+            "triggered:" + std::to_string(detector_triggered) +
+            ";accepted:" + std::to_string(accepted) +
+            ";attempted:" + std::to_string(attempted) +
+            ";reject_wait:" + std::to_string(rejected_wait) +
+            ";reject_memory:" + std::to_string(rejected_memory) +
+            ";reject_finish:" + std::to_string(rejected_finish) +
+            ";skipped_time:" + std::to_string(skipped_time);
+    };
+
+    try {
+        std::unordered_map<int, const Task*> tasks;
+        for (const Task& task : instance_.tasks) tasks[task.id] = &task;
+        std::vector<std::pair<double, int>> waits;
+        waits.reserve(baseline.size());
+        for (const Assignment& assignment : baseline) {
+            const Task& task = *tasks.at(assignment.task_id);
+            waits.push_back({
+                static_cast<double>(assignment.start_time - task.release_time) *
+                    task.weight,
+                task.id,
+            });
+        }
+        std::sort(waits.begin(), waits.end(), [](const auto& left, const auto& right) {
+            if (left.first != right.first) return left.first > right.first;
+            return left.second < right.second;
+        });
+        const double total_wait = std::accumulate(
+            waits.begin(), waits.end(), 0.0,
+            [](double sum, const auto& item) { return sum + item.first; }
+        );
+        const double top1_share = total_wait <= 0.0
+            ? 0.0 : waits.front().first / total_wait;
+        double top5_wait = 0.0;
+        for (std::size_t index = 0;
+             index < std::min<std::size_t>(5, waits.size()); ++index) {
+            top5_wait += waits[index].first;
+        }
+        const double top5_share = total_wait <= 0.0
+            ? 0.0 : top5_wait / total_wait;
+        const Task& dominant = *tasks.at(waits.front().second);
+
+        std::vector<double> weights;
+        std::vector<int> feasible_counts;
+        weights.reserve(instance_.tasks.size());
+        feasible_counts.reserve(instance_.tasks.size());
+        std::unordered_map<int, int> feasible_by_task;
+        for (const Task& task : instance_.tasks) {
+            weights.push_back(task.weight);
+            int count = 0;
+            for (const Server& server : instance_.servers) {
+                const int gpu = std::max(
+                    task.min_gpu,
+                    (task.total_gpu_memory + server.gpu_memory - 1) /
+                        server.gpu_memory
+                );
+                count += gpu <= server.gpu_count &&
+                    task.cpu_cores <= server.cpu_cores &&
+                    task.memory <= server.memory ? 1 : 0;
+            }
+            feasible_counts.push_back(count);
+            feasible_by_task[task.id] = count;
+        }
+        std::sort(weights.begin(), weights.end());
+        std::sort(feasible_counts.begin(), feasible_counts.end());
+        const double weight_p90 = weights[static_cast<std::size_t>(
+            std::floor(0.90 * (weights.size() - 1))
+        )];
+        const int feasible_p25 = feasible_counts[static_cast<std::size_t>(
+            std::floor(0.25 * (feasible_counts.size() - 1))
+        )];
+        const bool detected =
+            total_wait > 0.0 &&
+            top5_share >= 0.70 &&
+            (top1_share >= 0.70 || top5_share >= 0.90) &&
+            dominant.weight >= weight_p90 &&
+            feasible_by_task[dominant.id] <= feasible_p25;
+        if (!detected) {
+            finish_stats();
+            return baseline;
+        }
+        detector_triggered = 1;
+        if (elapsed() > 52.0) {
+            skipped_time = 1;
+            finish_stats();
+            return baseline;
+        }
+
+        struct HardFeature {
+            int task_id = 0;
+            double score = 0.0;
+            double regret = 0.0;
+        };
+        double max_weight = 1.0;
+        double max_duration = 1.0;
+        double max_gpu = 1.0;
+        double max_memory = 1.0;
+        for (const Task& task : instance_.tasks) {
+            max_weight = std::max(max_weight, static_cast<double>(task.weight));
+            max_duration = std::max(max_duration, static_cast<double>(task.duration));
+            max_gpu = std::max(max_gpu, static_cast<double>(task.min_gpu));
+            max_memory = std::max(
+                max_memory,
+                static_cast<double>(task.total_gpu_memory)
+            );
+        }
+        std::vector<HardFeature> features;
+        for (const Task& task : instance_.tasks) {
+            std::vector<double> costs;
+            for (const Server& server : instance_.servers) {
+                const int gpu = std::max(
+                    task.min_gpu,
+                    (task.total_gpu_memory + server.gpu_memory - 1) /
+                        server.gpu_memory
+                );
+                if (gpu > server.gpu_count || task.cpu_cores > server.cpu_cores ||
+                    task.memory > server.memory) continue;
+                const double memory_fit = static_cast<double>(task.duration) *
+                    (gpu * server.gpu_memory - task.total_gpu_memory);
+                const double gpu_ratio = static_cast<double>(gpu) / server.gpu_count;
+                const double cpu_ratio = static_cast<double>(task.cpu_cores) /
+                    server.cpu_cores;
+                const double ram_ratio = static_cast<double>(task.memory) /
+                    server.memory;
+                const double shape = std::max({gpu_ratio, cpu_ratio, ram_ratio}) -
+                    std::min({gpu_ratio, cpu_ratio, ram_ratio});
+                costs.push_back(memory_fit + shape * task.duration * 1000.0);
+            }
+            std::sort(costs.begin(), costs.end());
+            const double best = costs.empty() ? 0.0 : costs[0];
+            const double second = costs.size() > 1 ? costs[1] : best + 1e6;
+            const double hardness = 1.0 / std::max<std::size_t>(1, costs.size());
+            const double pressure = costs.empty() ? 1.0 :
+                best / (1.0 + task.duration * max_memory);
+            const double hard_score =
+                task.weight / max_weight +
+                task.duration / max_duration +
+                task.min_gpu / max_gpu +
+                task.total_gpu_memory / max_memory +
+                hardness + pressure +
+                (task.release_time + task.duration) /
+                    (1.0 + max_duration + task.release_time);
+            features.push_back(HardFeature{
+                task.id, hard_score, second - best,
+            });
+        }
+        std::sort(features.begin(), features.end(), [](const HardFeature& left, const HardFeature& right) {
+            if (left.score != right.score) return left.score > right.score;
+            return left.task_id < right.task_id;
+        });
+
+        Candidate best_candidate = baseline_metrics;
+        double best_proxy = 0.0;
+        for (int percent : {10, 15, 5}) {
+            if (elapsed() >= 55.0) {
+                skipped_time = 1;
+                break;
+            }
+            SchedulerConfig config = scheduler_config_from_name("v1d_strong");
+            config.name = "emergency_hard_p" + std::to_string(percent);
+            config.server_score.w_residual_imbalance = 3.0;
+            config.server_score.w_cpu_fragment = 1.5;
+            config.server_score.w_memory_fragment = 1.5;
+            config.memory_aware_score.enabled = true;
+            config.memory_aware_score.w_duration_memory_waste = 24.0;
+            config.isolation_score.enabled = true;
+            config.isolation_score.w_high_capacity_reserve = 2.0;
+            config.isolation_score.w_class_mismatch = 3.0;
+            config.task_score.w_wait = 0.025;
+            std::unordered_map<int, double> boosts;
+            const int count = std::max<int>(
+                1,
+                static_cast<int>(features.size()) * percent / 100
+            );
+            for (int index = 0; index < count; ++index) {
+                boosts[features[index].task_id] =
+                    2500.0 + 500.0 * features[index].regret;
+            }
+            try {
+                ++attempted;
+                const std::string candidate_name = config.name;
+                Candidate candidate = run_candidate_until(
+                    candidate_name,
+                    std::move(config),
+                    std::move(boosts),
+                    deadline
+                );
+                const bool wait_ok = candidate.e_wait <=
+                    baseline_metrics.e_wait * 0.50;
+                const bool memory_ok = candidate.e_memory_new <=
+                    baseline_metrics.e_memory_new * 1.05;
+                const bool finish_ok = candidate.e_finish <=
+                    baseline_metrics.e_finish * 1.005;
+                rejected_wait += wait_ok ? 0 : 1;
+                rejected_memory += memory_ok ? 0 : 1;
+                rejected_finish += finish_ok ? 0 : 1;
+                const double proxy =
+                    candidate.e_wait /
+                        std::max(1.0, baseline_metrics.e_wait) - 1.0 +
+                    1.25 * (candidate.e_memory_new /
+                        std::max(1.0, baseline_metrics.e_memory_new) - 1.0) +
+                    static_cast<double>(candidate.e_finish) /
+                        std::max(1.0, static_cast<double>(baseline_metrics.e_finish)) - 1.0;
+                if (wait_ok && memory_ok && finish_ok && proxy < best_proxy) {
+                    best_proxy = proxy;
+                    best_candidate = std::move(candidate);
+                }
+            } catch (const std::exception&) {
+                skipped_time = 1;
+                break;
+            }
+        }
+        if (best_proxy < 0.0) {
+            accepted = 1;
+            selected_config_ = best_candidate.config_name;
+            finish_stats();
+            return best_candidate.schedule;
+        }
+        finish_stats();
+        return baseline;
+    } catch (const std::exception&) {
+        finish_stats();
+        return baseline;
+    }
+}
+
 const std::string& PortfolioScheduler::selected_config() const {
     return selected_config_;
 }
@@ -1231,4 +1476,8 @@ int PortfolioScheduler::aborted_candidate_count() const {
 
 const std::string& PortfolioScheduler::guard_triggered_stage() const {
     return guard_triggered_stage_;
+}
+
+const std::string& PortfolioScheduler::emergency_stats() const {
+    return emergency_stats_;
 }
